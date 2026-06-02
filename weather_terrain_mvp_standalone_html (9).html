@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Weather Terrain MVP - Clean Weather Field</title>
+
+  <link href="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.js"></script>
+
+  <style>
+    :root {
+      --bg: #020617;
+      --text: #e0f2fe;
+      --muted: #bfdbfe;
+      --border: rgba(125, 211, 252, 0.26);
+      --cyan: #22d3ee;
+      --error-bg: rgba(127, 29, 29, 0.84);
+      --error-text: #fecaca;
+      --warn-bg: rgba(120, 53, 15, 0.84);
+      --warn-text: #fde68a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    #map { position: fixed; inset: 0; background: #071724; }
+
+    .scanlines {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 4;
+      background: repeating-linear-gradient(to bottom, rgba(255,255,255,0.012), rgba(255,255,255,0.012) 1px, transparent 1px, transparent 5px);
+      mix-blend-mode: overlay;
+      opacity: 0.08;
+    }
+
+    .panel {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: min(420px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      overflow: auto;
+      background: linear-gradient(145deg, rgba(3, 10, 24, 0.95), rgba(8, 47, 73, 0.76));
+      backdrop-filter: blur(18px) saturate(1.25);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 16px;
+      box-shadow: 0 24px 90px rgba(0, 0, 0, 0.56), 0 0 42px rgba(56, 189, 248, 0.13);
+      z-index: 5;
+    }
+
+    .eyebrow {
+      color: #93c5fd;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-shadow: 0 0 12px rgba(56, 189, 248, 0.45);
+    }
+
+    h1 { margin: 6px 0 4px; font-size: 25px; line-height: 1.08; color: white; }
+    .lead { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+
+    .notice { margin-top: 12px; padding: 12px; border-radius: 14px; font-size: 14px; line-height: 1.4; }
+    .notice.warn { background: var(--warn-bg); color: var(--warn-text); }
+    .notice.error { background: var(--error-bg); color: var(--error-text); }
+    .hidden { display: none !important; }
+
+    .layer-picker, .legend, .control-row, .slider-wrap {
+      margin-top: 14px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.66);
+      box-shadow: inset 0 0 22px rgba(56, 189, 248, 0.04);
+    }
+
+    .section-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; font-size: 14px; font-weight: 900; color: white; }
+    .layer-buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+    button {
+      border: 1px solid rgba(125, 211, 252, 0.28);
+      cursor: pointer;
+      border-radius: 13px;
+      padding: 9px 12px;
+      font-weight: 900;
+      background: rgba(15, 23, 42, 0.72);
+      color: #bfdbfe;
+      box-shadow: 0 0 18px rgba(56, 189, 248, 0.10);
+    }
+
+    button.selected, button.active { background: rgba(34, 211, 238, 0.24); border-color: rgba(103, 232, 249, 0.72); color: white; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+    .layer-btn { padding: 10px 8px; font-size: 12px; text-align: center; }
+
+    .legend-gradient {
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.18);
+      box-shadow: 0 0 22px rgba(56, 189, 248, 0.12);
+      background: linear-gradient(90deg, #1d4ed8, #2563eb, #06b6d4, #22c55e, #d9f99d, #facc15, #f97316, #dc2626, #7f1d1d);
+    }
+
+    .legend-scale { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 12px; color: #bfdbfe; }
+    .legend-note { margin-top: 10px; color: #93c5fd; font-size: 12px; line-height: 1.35; }
+    .control-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .control-row label, .slider-head { font-size: 14px; font-weight: 850; color: white; }
+    .slider-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    input[type="range"] { width: 100%; accent-color: var(--cyan); }
+
+    .stats { margin-top: 14px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat { background: rgba(15, 23, 42, 0.68); border: 1px solid var(--border); border-radius: 16px; padding: 10px; }
+    .stat-label { color: #93c5fd; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 900; }
+    .stat-value { margin-top: 4px; color: white; font-size: 17px; font-weight: 950; }
+
+    .bottom-tip {
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      max-width: min(860px, calc(100vw - 32px));
+      background: rgba(3, 10, 24, 0.94);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      color: #bfdbfe;
+      font-size: 13px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42), 0 0 24px rgba(56, 189, 248, 0.12);
+      z-index: 5;
+    }
+
+    @media (max-width: 640px) {
+      .panel { top: 10px; left: 10px; width: calc(100vw - 20px); padding: 13px; }
+      h1 { font-size: 22px; }
+      .layer-buttons { grid-template-columns: repeat(2, 1fr); }
+      .bottom-tip { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="scanlines"></div>
+
+  <main class="panel">
+    <div class="eyebrow">⛰️ Weather Terrain MVP</div>
+    <h1>Gyors időjárási térkép</h1>
+    <p class="lead">Térképes alaptérkép + domborzat + időjárási mező. A hőmező fix skálát használ: 22 °C zöld, hidegebb kék, melegebb piros.</p>
+
+    <div id="mapWarning" class="notice warn hidden"></div>
+    <div id="errorBox" class="notice error hidden"></div>
+
+    <section class="layer-picker">
+      <div class="section-title"><span>Megjelenített réteg</span><span id="sampleCount">0 minta</span></div>
+      <div class="layer-buttons">
+        <button class="layer-btn selected" data-layer="temperature">Hő</button>
+        <button class="layer-btn" data-layer="rain">Eső</button>
+        <button class="layer-btn" data-layer="wind">Szél</button>
+        <button class="layer-btn" data-layer="snow">Hó</button>
+        <button class="layer-btn" data-layer="cloud">Felhő</button>
+        <button class="layer-btn" data-layer="risk">Kockázat</button>
+      </div>
+    </section>
+
+    <section class="legend">
+      <div class="section-title"><span id="legendTitle">Hőmérséklet</span><span id="legendUnit">°C</span></div>
+      <div id="legendGradient" class="legend-gradient"></div>
+      <div class="legend-scale"><span id="legendMin">hideg</span><span id="legendMid">közepes</span><span id="legendMax">meleg</span></div>
+      <div id="legendNote" class="legend-note">A hőskála a látható térség helyi minimum–maximum értékeihez igazodik.</div>
+    </section>
+
+    <section class="stats">
+      <div class="stat"><div class="stat-label">Minimum</div><div id="statMin" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label">Átlag</div><div id="statAvg" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label">Maximum</div><div id="statMax" class="stat-value">–</div></div>
+    </section>
+
+    <section class="control-row"><label>Térképnézet</label><button id="mapBaseBtn" class="active">Bekapcsolva</button></section>
+
+    <section class="control-row"><label>Időjárási mező</label><button id="fieldBtn" class="active">Bekapcsolva</button></section>
+
+    <section class="slider-wrap">
+      <div class="slider-head"><span>Mező intenzitás</span><span id="intensityLabel">1.0×</span></div>
+      <input id="intensitySlider" type="range" min="0.2" max="1.8" step="0.1" value="1" />
+    </section>
+
+
+    <section class="slider-wrap">
+      <div class="slider-head"><span>Domborzat kiemelés</span><span id="terrainLabel">1.5×</span></div>
+      <input id="terrainSlider" type="range" min="0" max="3" step="0.1" value="1.5" />
+    </section>
+  </main>
+
+  <div class="bottom-tip">A hőmérséklet fix színskálán fut: -45 °C mélykék, 0 °C kék/cián, 22 °C zöld, 32 °C narancs, +45 °C vörös. A térképnézet külön kapcsolható.</div>
+
+  <script>
+    const DEFAULT_CENTER = [19.0402, 47.4979];
+    const MAPTILER_KEY = "aX0oCOi0xeZIkeidagYz";
+    const DEFAULT_ZOOM = 7;
+    const MAX_WEATHER_POINTS = 42;
+    const INITIAL_RENDER_POINTS = 3;
+    const WEATHER_POINT_TTL_MS = 10 * 60 * 1000;
+    const FIELD_SOURCE_ID = "weather-field-source";
+    const FIELD_LAYER_ID = "weather-field-layer";
+    const WORLD_COUNTRIES_URL = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson";
+    
+
+    let terrainExaggeration = 1.5;
+    let fieldIntensity = 1.0;
+    let fieldSmoothing = 1.0;
+    let fieldEnabled = true;
+    let mapBaseEnabled = true;
+    let activeWeatherLayer = "temperature";
+    let map = null;
+    let weatherCache = new Map();
+    let sampleTimer = null;
+    let sampleAbortController = null;
+    let latestSamples = [];
+
+    const layerConfig = {
+      temperature: { title: "Hőmérséklet", unit: "°C", minLabel: "-45°", midLabel: "22°", maxLabel: "+45°", gradient: "linear-gradient(90deg, #172554, #1d4ed8, #06b6d4, #22c55e, #f97316, #dc2626, #7f1d1d)", stops: [-45, 0, 22, 32, 45], alpha: 0.54, neutral: null, localDomain: false, fixedCenter: 22 },
+      rain: { title: "Csapadék", unit: "mm", minLabel: "száraz", midLabel: "eső", maxLabel: "intenzív", gradient: "linear-gradient(90deg, rgba(56,189,248,0), #22d3ee, #60a5fa, #a78bfa, #f87171)", stops: [0, 0.2, 1, 4, 8], alpha: 0.48, neutral: { below: 0.08, fadeTo: 0.7 }, localDomain: false },
+      wind: { title: "Szélsebesség", unit: "km/h", minLabel: "szélcsend", midLabel: "szeles", maxLabel: "erős", gradient: "linear-gradient(90deg, rgba(52,211,153,0), #22d3ee, #facc15, #fb923c, #f87171)", stops: [0, 8, 20, 40, 65], alpha: 0.42, neutral: { below: 6, fadeTo: 16 }, localDomain: false },
+      snow: { title: "Havazás", unit: "cm", minLabel: "nincs", midLabel: "hó", maxLabel: "erős", gradient: "linear-gradient(90deg, rgba(147,197,253,0), #93c5fd, #e0f2fe, #ffffff)", stops: [0, 0.1, 1, 3, 6], alpha: 0.50, neutral: { below: 0.03, fadeTo: 0.8 }, localDomain: false },
+      cloud: { title: "Felhőzet", unit: "%", minLabel: "derült", midLabel: "felhős", maxLabel: "borult", gradient: "linear-gradient(90deg, rgba(250,204,21,0), #93c5fd, #cbd5e1, #f8fafc)", stops: [0, 25, 55, 80, 100], alpha: 0.36, neutral: { below: 18, fadeTo: 45 }, localDomain: false },
+      risk: { title: "Outdoor kockázat", unit: "index", minLabel: "alacsony", midLabel: "közepes", maxLabel: "magas", gradient: "linear-gradient(90deg, rgba(52,211,153,0), #facc15, #fb923c, #f87171)", stops: [0, 1, 2, 4, 6], alpha: 0.48, neutral: { below: 1, fadeTo: 2.5 }, localDomain: false },
+    };
+
+        function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+    function round(value, decimals = 1) { if (value === null || value === undefined || Number.isNaN(value)) return "–"; return Number(value).toFixed(decimals); }
+    function setText(id, text) { document.getElementById(id).textContent = text; }
+    function showBox(id, message) { const el = document.getElementById(id); if (!message) { el.classList.add("hidden"); el.textContent = ""; return; } el.classList.remove("hidden"); el.textContent = message; }
+
+    function makeOpenMeteoUrl(lat, lng) {
+      const params = new URLSearchParams({ latitude: String(lat), longitude: String(lng), current: ["temperature_2m", "apparent_temperature", "precipitation", "snowfall", "weather_code", "cloud_cover", "wind_speed_10m"].join(","), forecast_days: "1", timezone: "auto" });
+      return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+    }
+
+    function getRiskValue(current) {
+      if (!current) return 0;
+      let score = 0;
+      if ((current.wind_speed_10m || 0) >= 45) score += 3; else if ((current.wind_speed_10m || 0) >= 25) score += 1;
+      if ((current.precipitation || 0) >= 5) score += 3; else if ((current.precipitation || 0) > 0) score += 1;
+      if ((current.snowfall || 0) > 0) score += 2;
+      if ((current.temperature_2m ?? 20) <= 0) score += 1;
+      if (current.weather_code === 45 || current.weather_code === 48) score += 2;
+      return score;
+    }
+
+    function valueForLayer(layer, current) {
+      if (!current) return 0;
+      if (layer === "temperature") return current.temperature_2m ?? 0;
+      if (layer === "rain") return current.precipitation ?? 0;
+      if (layer === "wind") return current.wind_speed_10m ?? 0;
+      if (layer === "snow") return current.snowfall ?? 0;
+      if (layer === "cloud") return current.cloud_cover ?? 0;
+      if (layer === "risk") return getRiskValue(current);
+      return 0;
+    }
+
+    function getDomain(layer, samples) {
+      const config = layerConfig[layer];
+      return { min: config.stops[0], max: config.stops[config.stops.length - 1] };
+    }
+
+    function normalizeValue(layer, value, domain = null) { const c = layerConfig[layer]; const d = domain || { min: c.stops[0], max: c.stops[c.stops.length - 1] }; return clamp((value - d.min) / (d.max - d.min), 0, 1); }
+    function neutralAlphaFactor(layer, value) { const n = layerConfig[layer].neutral; if (!n) return 1; if (value <= n.below) return 0; if (value >= n.fadeTo) return 1; return clamp((value - n.below) / (n.fadeTo - n.below), 0, 1); }
+
+    function interpolateColor(stops, value) {
+      if (value <= stops[0][0]) return stops[0][1];
+      for (let i = 0; i < stops.length - 1; i++) {
+        const [v1, c1] = stops[i];
+        const [v2, c2] = stops[i + 1];
+        if (value <= v2) {
+          const t = (value - v1) / (v2 - v1);
+          return [
+            Math.round(c1[0] + (c2[0] - c1[0]) * t),
+            Math.round(c1[1] + (c2[1] - c1[1]) * t),
+            Math.round(c1[2] + (c2[2] - c1[2]) * t),
+          ];
+        }
+      }
+      return stops[stops.length - 1][1];
+    }
+
+    function colorForValue(layer, value, normalized) {
+      if (layer === "temperature") {
+        return interpolateColor([
+          [-45, [23, 37, 84]],
+          [0, [37, 99, 235]],
+          [12, [6, 182, 212]],
+          [22, [34, 197, 94]],
+          [32, [249, 115, 22]],
+          [45, [127, 29, 29]],
+        ], value);
+      }
+      return palette(layer, normalized);
+    }
+
+    function palette(layer, t) {
+      t = clamp(t, 0, 1);
+      const palettes = {
+        rain: [[34,211,238], [96,165,250], [167,139,250], [248,113,113]],
+        wind: [[34,211,238], [250,204,21], [251,146,60], [248,113,113]],
+        snow: [[147,197,253], [224,242,254], [255,255,255]],
+        cloud: [[147,197,253], [203,213,225], [248,250,252]],
+        risk: [[250,204,21], [251,146,60], [248,113,113]],
+      };
+      const colors = palettes[layer] || palettes.rain;
+      const scaled = t * (colors.length - 1), index = Math.floor(scaled), frac = scaled - index;
+      const a = colors[index], b = colors[Math.min(index + 1, colors.length - 1)];
+      return [Math.round(a[0] + (b[0] - a[0]) * frac), Math.round(a[1] + (b[1] - a[1]) * frac), Math.round(a[2] + (b[2] - a[2]) * frac)];
+    }
+
+    function buildMapStyle() {
+      return {
+        version: 8,
+        glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+        sources: {
+          base: { type: "raster", tiles: [`https://api.maptiler.com/maps/outdoor-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`], tileSize: 256, attribution: "© MapTiler © OpenStreetMap contributors" },
+          countries: { type: "geojson", data: WORLD_COUNTRIES_URL },
+          terrain: { type: "raster-dem", tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"], tileSize: 256, encoding: "terrarium", attribution: "DEM tiles © AWS / Mapzen" },
+        },
+        layers: [
+          { id: "background", type: "background", paint: { "background-color": "#071724" } },
+          { id: "base", type: "raster", source: "base", paint: { "raster-saturation": -0.35, "raster-brightness-min": 0.08, "raster-brightness-max": 0.72, "raster-contrast": 0.12 } },
+          { id: "country-fill", type: "fill", source: "countries", paint: { "fill-color": "rgba(38, 85, 58, 0.18)", "fill-outline-color": "rgba(226,232,240,0.16)" } },
+          { id: "hillshade", type: "hillshade", source: "terrain", paint: { "hillshade-shadow-color": "#020617", "hillshade-highlight-color": "#7dd3fc", "hillshade-accent-color": "#38bdf8", "hillshade-exaggeration": 0.55 } },
+          { id: "country-lines-soft", type: "line", source: "countries", paint: { "line-color": "rgba(255,255,255,0.18)", "line-width": 0.8, "line-blur": 0.5 } },
+          { id: "country-lines", type: "line", source: "countries", paint: { "line-color": "rgba(255,255,255,0.42)", "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.8, 8, 1.4, 11, 2.1], "line-blur": 0.1 } }
+        ],
+      };
+    }
+
+    function initMap() {
+      map = new maplibregl.Map({ container: "map", center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, pitch: 45, bearing: -12, antialias: true, style: buildMapStyle() });
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+      map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
+      map.on("load", () => {
+        if (map.getSource("terrain")) {
+          map.setTerrain({ source: "terrain", exaggeration: terrainExaggeration });
+          map.setSky({ "sky-color": "#020617", "sky-horizon-blend": 0.3, "horizon-color": "#082f49", "horizon-fog-blend": 0.55, "fog-color": "#0f172a", "fog-ground-blend": 0.65 });
+        }
+        updateLegend();
+        refreshWeatherSamples();
+      });
+      map.on("error", (event) => {
+        const message = event && event.error && event.error.message ? event.error.message : "Térképcsempe betöltési hiba.";
+        if (message.includes("countries.geojson") || message.includes("natural-earth")) showBox("mapWarning", "Az online alap-geográfia egy része nem töltött be. Internet/CORS hiba lehet.");
+      });
+      map.on("moveend", scheduleWeatherSamples);
+      map.on("zoomend", scheduleWeatherSamples);
+    }
+
+    function scheduleWeatherSamples() { if (sampleTimer) clearTimeout(sampleTimer); sampleTimer = setTimeout(refreshWeatherSamples, 450); }
+    function getFieldBounds() { const b = map.getBounds(); return { west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; }
+    function getImageCoordinates(bounds) { return [[bounds.west, bounds.north], [bounds.east, bounds.north], [bounds.east, bounds.south], [bounds.west, bounds.south]]; }
+
+    function getSamplePoints() {
+      if (!map) return [];
+      const bounds = getFieldBounds();
+      const zoom = map.getZoom();
+      const cols = zoom < 6 ? 5 : zoom < 8 ? 6 : 7;
+      const rows = zoom < 6 ? 4 : zoom < 8 ? 5 : 6;
+      const points = [];
+      const seen = new Set();
+      const center = map.getCenter();
+      points.push({ lat: center.lat, lng: center.lng });
+      points.push({ lat: bounds.south + 0.25 * (bounds.north - bounds.south), lng: bounds.west + 0.25 * (bounds.east - bounds.west) });
+      points.push({ lat: bounds.south + 0.75 * (bounds.north - bounds.south), lng: bounds.west + 0.75 * (bounds.east - bounds.west) });
+      for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) points.push({ lng: bounds.west + ((x + 0.5) / cols) * (bounds.east - bounds.west), lat: bounds.south + ((y + 0.5) / rows) * (bounds.north - bounds.south) });
+      return points.filter((p) => { const key = `${p.lat.toFixed(1)},${p.lng.toFixed(1)}`; if (seen.has(key) || !Number.isFinite(p.lat) || !Number.isFinite(p.lng) || Math.abs(p.lat) > 85) return false; seen.add(key); return true; }).slice(0, MAX_WEATHER_POINTS);
+    }
+
+    function cacheKey(point) { return `${point.lat.toFixed(2)},${point.lng.toFixed(2)}`; }
+    async function fetchSamplePoint(point, signal) {
+      const key = cacheKey(point);
+      const cached = weatherCache.get(key);
+      if (cached && Date.now() - cached.time < WEATHER_POINT_TTL_MS) return { ...cached.value, lat: point.lat, lng: point.lng };
+      const response = await fetch(makeOpenMeteoUrl(point.lat, point.lng), { signal });
+      if (!response.ok) throw new Error(`Open-Meteo sample error: ${response.status}`);
+      const data = await response.json();
+      const value = { lat: point.lat, lng: point.lng, current: data.current };
+      weatherCache.set(key, { time: Date.now(), value });
+      return value;
+    }
+
+    async function refreshWeatherSamples() {
+      if (!map || !map.isStyleLoaded()) return;
+      if (!fieldEnabled) { removeWeatherField(); setText("sampleCount", "0 minta"); updateStats([]); return; }
+      if (sampleAbortController) sampleAbortController.abort();
+      sampleAbortController = new AbortController();
+      const signal = sampleAbortController.signal;
+      const points = getSamplePoints();
+      const bounds = getFieldBounds();
+      const collected = [];
+      let firstPaintDone = false;
+      setText("sampleCount", `${points.length} minta frissül`);
+      showBox("errorBox", "");
+      await Promise.allSettled(points.map(async (point) => {
+        const result = await fetchSamplePoint(point, signal);
+        if (signal.aborted) return;
+        const sample = { lat: result.lat, lng: result.lng, value: valueForLayer(activeWeatherLayer, result.current) };
+        collected.push(sample);
+        if (!firstPaintDone && collected.length >= INITIAL_RENDER_POINTS) {
+          firstPaintDone = true;
+          latestSamples = collected.slice();
+          renderWeatherField(latestSamples, bounds);
+          updateStats(latestSamples);
+          setText("sampleCount", `${latestSamples.length}/${points.length} minta`);
+        }
+      }));
+      if (signal.aborted) return;
+      latestSamples = collected;
+      if (!latestSamples.length) { showBox("errorBox", "Nem sikerült mintákat lekérni ehhez a nézethez."); removeWeatherField(); updateStats([]); setText("sampleCount", "0 minta"); return; }
+      renderWeatherField(latestSamples, bounds);
+      updateStats(latestSamples);
+      setText("sampleCount", `${latestSamples.length} minta`);
+    }
+
+    function renderWeatherField(samples, bounds) {
+      const imageUrl = createInterpolatedFieldImage(samples, bounds, activeWeatherLayer);
+      const coordinates = getImageCoordinates(bounds);
+      if (!map.getSource(FIELD_SOURCE_ID)) map.addSource(FIELD_SOURCE_ID, { type: "image", url: imageUrl, coordinates });
+      else {
+        const source = map.getSource(FIELD_SOURCE_ID);
+        if (source.updateImage) source.updateImage({ url: imageUrl, coordinates });
+        else { if (map.getLayer(FIELD_LAYER_ID)) map.removeLayer(FIELD_LAYER_ID); map.removeSource(FIELD_SOURCE_ID); map.addSource(FIELD_SOURCE_ID, { type: "image", url: imageUrl, coordinates }); }
+      }
+      if (!map.getLayer(FIELD_LAYER_ID)) {
+        const beforeId = map.getLayer("country-lines") ? "country-lines" : undefined;
+        map.addLayer({ id: FIELD_LAYER_ID, type: "raster", source: FIELD_SOURCE_ID, paint: { "raster-opacity": fieldEnabled ? 0.70 : 0, "raster-resampling": "linear", "raster-fade-duration": 180 } }, beforeId);
+      } else map.setPaintProperty(FIELD_LAYER_ID, "raster-opacity", fieldEnabled ? 0.70 : 0);
+    }
+
+    function createInterpolatedFieldImage(samples, bounds, layer) {
+      const width = 210, height = 136;
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      const image = ctx.createImageData(width, height);
+      const data = image.data;
+      const config = layerConfig[layer];
+      const domain = getDomain(layer, samples);
+      const power = 1.85 / fieldSmoothing;
+      const maxDistance = 0.82 * fieldSmoothing;
+      const projected = samples.map((s) => ({ x: (s.lng - bounds.west) / (bounds.east - bounds.west), y: 1 - (s.lat - bounds.south) / (bounds.north - bounds.south), value: s.value }));
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const nx = x / (width - 1), ny = y / (height - 1);
+          let weighted = 0, weightSum = 0, neutralWeighted = 0, nearest = Infinity;
+          for (const p of projected) {
+            const dx = nx - p.x, dy = ny - p.y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            nearest = Math.min(nearest, d);
+            const w = 1 / Math.pow(d + 0.07, power);
+            weighted += p.value * w;
+            neutralWeighted += neutralAlphaFactor(layer, p.value) * w;
+            weightSum += w;
+          }
+          const value = weightSum > 0 ? weighted / weightSum : 0;
+          const neutralFactor = weightSum > 0 ? neutralWeighted / weightSum : 0;
+          const normalized = normalizeValue(layer, value, domain);
+          const contrast = layer === "temperature" ? 1 : fieldIntensity;
+          const boosted = clamp((normalized - 0.5) * contrast + 0.5, 0, 1);
+          const [r, g, b] = colorForValue(layer, value, boosted);
+          const distanceFade = clamp(1 - nearest / maxDistance, 0, 1);
+          const alpha = Math.round(255 * config.alpha * neutralFactor * fieldIntensity * (0.62 + 0.38 * distanceFade));
+          const i = (y * width + x) * 4;
+          data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = alpha;
+        }
+      }
+      ctx.putImageData(image, 0, 0);
+      return canvas.toDataURL("image/png");
+    }
+
+    function removeWeatherField() { if (!map) return; if (map.getLayer(FIELD_LAYER_ID)) map.removeLayer(FIELD_LAYER_ID); if (map.getSource(FIELD_SOURCE_ID)) map.removeSource(FIELD_SOURCE_ID); }
+    function rerenderExistingSamples() { if (!latestSamples.length || !fieldEnabled) return; renderWeatherField(latestSamples, getFieldBounds()); updateStats(latestSamples); }
+
+    function updateLegend() {
+      const c = layerConfig[activeWeatherLayer];
+      setText("legendTitle", c.title); setText("legendUnit", c.unit); setText("legendMin", c.minLabel); setText("legendMid", c.midLabel); setText("legendMax", c.maxLabel);
+      document.getElementById("legendGradient").style.background = c.gradient;
+      setText("legendNote", activeWeatherLayer === "temperature" ? "Fix hőskála: 22 °C zöld; hidegebb értékek kékbe, melegebb értékek sárgán/narancson át pirosba futnak." : "Neutrális értékeknél a mező áttetsző vagy teljesen láthatatlan.");
+    }
+
+    function updateStats(samples) {
+      if (!samples.length) { setText("statMin", "–"); setText("statAvg", "–"); setText("statMax", "–"); return; }
+      const values = samples.map((s) => s.value).filter(Number.isFinite);
+      const min = Math.min(...values), max = Math.max(...values), avg = values.reduce((a,b) => a + b, 0) / values.length;
+      const unit = layerConfig[activeWeatherLayer].unit;
+      const decimals = activeWeatherLayer === "cloud" || activeWeatherLayer === "wind" || activeWeatherLayer === "risk" ? 0 : 1;
+      setText("statMin", `${round(min, decimals)} ${unit}`); setText("statAvg", `${round(avg, decimals)} ${unit}`); setText("statMax", `${round(max, decimals)} ${unit}`);
+      if (activeWeatherLayer === "temperature") { setText("legendMin", "-45°"); setText("legendMid", "22°"); setText("legendMax", "+45°"); }
+    }
+
+    function bindControls() {
+      document.getElementById("mapBaseBtn").addEventListener("click", () => {
+        mapBaseEnabled = !mapBaseEnabled;
+        const btn = document.getElementById("mapBaseBtn");
+        btn.textContent = mapBaseEnabled ? "Bekapcsolva" : "Kikapcsolva";
+        btn.classList.toggle("active", mapBaseEnabled);
+        setBaseMapVisibility(mapBaseEnabled);
+      });
+      document.getElementById("fieldBtn").addEventListener("click", () => { fieldEnabled = !fieldEnabled; const btn = document.getElementById("fieldBtn"); btn.textContent = fieldEnabled ? "Bekapcsolva" : "Kikapcsolva"; btn.classList.toggle("active", fieldEnabled); if (fieldEnabled) refreshWeatherSamples(); else { removeWeatherField(); updateStats([]); setText("sampleCount", "0 minta"); } });
+      document.querySelectorAll(".layer-btn").forEach((button) => button.addEventListener("click", () => { activeWeatherLayer = button.dataset.layer; document.querySelectorAll(".layer-btn").forEach((b) => b.classList.remove("selected")); button.classList.add("selected"); updateLegend(); refreshWeatherSamples(); }));
+      document.getElementById("intensitySlider").addEventListener("input", (event) => { fieldIntensity = Number(event.target.value); setText("intensityLabel", `${fieldIntensity.toFixed(1)}×`); rerenderExistingSamples(); });
+      document.getElementById("terrainSlider").addEventListener("input", (event) => { terrainExaggeration = Number(event.target.value); setText("terrainLabel", `${terrainExaggeration.toFixed(1)}×`); if (map && map.isStyleLoaded() && map.getSource("terrain")) map.setTerrain({ source: "terrain", exaggeration: terrainExaggeration }); });
+    }
+
+    function setBaseMapVisibility(visible) {
+      if (!map) return;
+      const visibility = visible ? "visible" : "none";
+      ["base", "country-fill", "country-lines-soft", "country-lines"].forEach((id) => {
+        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
+      });
+    }
+
+    function runSelfTests() {
+      console.assert(round(null) === "–", "Null values should render as dash");
+      console.assert(neutralAlphaFactor("rain", 0) === 0, "No rain should be transparent");
+      console.assert(neutralAlphaFactor("snow", 0) === 0, "No snow should be transparent");
+      console.assert(neutralAlphaFactor("wind", 0) === 0, "Wind calm should be transparent");
+      console.assert(valueForLayer("cloud", { cloud_cover: 86 }) === 86, "Cloud value should be extracted");
+      console.assert(getDomain("temperature", [{ value: 12 }, { value: 29 }]).max === 45, "Temperature should use fixed +45 max");
+      console.assert(getDomain("temperature", [{ value: 12 }, { value: 29 }]).min === -45, "Temperature should use fixed -45 min");
+      console.assert(colorForValue("temperature", 22, 0.5)[1] === 197, "22 C should map to green");
+      console.assert(MAX_WEATHER_POINTS <= 42, "Frontend-only sample count should stay responsive");
+    }
+
+    runSelfTests();
+    bindControls();
+    initMap();
+  </script>
+</body>
+</html>

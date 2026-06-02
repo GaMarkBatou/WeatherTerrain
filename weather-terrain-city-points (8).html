@@ -1,0 +1,919 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Weather Terrain MVP - City Points</title>
+
+  <link href="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.js"></script>
+
+  <style>
+    :root {
+      --bg: #020617;
+      --text: #e0f2fe;
+      --muted: #bfdbfe;
+      --border: rgba(125, 211, 252, 0.26);
+      --cyan: #22d3ee;
+      --error-bg: rgba(127, 29, 29, 0.84);
+      --error-text: #fecaca;
+      --warn-bg: rgba(120, 53, 15, 0.84);
+      --warn-text: #fde68a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    #map { position: fixed; inset: 0; background: #071724; }
+
+    .scanlines {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 4;
+      background: repeating-linear-gradient(to bottom, rgba(255,255,255,0.012), rgba(255,255,255,0.012) 1px, transparent 1px, transparent 5px);
+      mix-blend-mode: overlay;
+      opacity: 0.08;
+    }
+
+    .panel {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: min(420px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      overflow: auto;
+      background: linear-gradient(145deg, rgba(3, 10, 24, 0.95), rgba(8, 47, 73, 0.76));
+      backdrop-filter: blur(18px) saturate(1.25);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 16px;
+      box-shadow: 0 24px 90px rgba(0, 0, 0, 0.56), 0 0 42px rgba(56, 189, 248, 0.13);
+      z-index: 5;
+    }
+
+    .eyebrow {
+      color: #93c5fd;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-shadow: 0 0 12px rgba(56, 189, 248, 0.45);
+    }
+
+    h1 { margin: 6px 0 4px; font-size: 25px; line-height: 1.08; color: white; }
+    .lead { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+
+    .notice { margin-top: 12px; padding: 12px; border-radius: 14px; font-size: 14px; line-height: 1.4; }
+    .notice.warn { background: var(--warn-bg); color: var(--warn-text); }
+    .notice.error { background: var(--error-bg); color: var(--error-text); }
+    .hidden { display: none !important; }
+
+    .layer-picker, .legend, .control-row, .slider-wrap {
+      margin-top: 14px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.66);
+      box-shadow: inset 0 0 22px rgba(56, 189, 248, 0.04);
+    }
+
+    .section-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+      font-size: 14px;
+      font-weight: 900;
+      color: white;
+    }
+
+    .layer-buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+    button {
+      border: 1px solid rgba(125, 211, 252, 0.28);
+      cursor: pointer;
+      border-radius: 13px;
+      padding: 9px 12px;
+      font-weight: 900;
+      background: rgba(15, 23, 42, 0.72);
+      color: #bfdbfe;
+      box-shadow: 0 0 18px rgba(56, 189, 248, 0.10);
+    }
+
+    button.selected, button.active {
+      background: rgba(34, 211, 238, 0.24);
+      border-color: rgba(103, 232, 249, 0.72);
+      color: white;
+    }
+
+    .layer-btn { padding: 10px 8px; font-size: 12px; text-align: center; }
+
+    .legend-gradient {
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.18);
+      box-shadow: 0 0 22px rgba(56, 189, 248, 0.12);
+      background: linear-gradient(90deg, #172554, #1d4ed8, #06b6d4, #22c55e, #f97316, #dc2626, #7f1d1d);
+    }
+
+    .legend-scale { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 12px; color: #bfdbfe; }
+    .legend-note { margin-top: 10px; color: #93c5fd; font-size: 12px; line-height: 1.35; }
+    .control-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .control-row label, .slider-head { font-size: 14px; font-weight: 850; color: white; }
+    .slider-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    input[type="range"] { width: 100%; accent-color: var(--cyan); }
+
+    .stats { margin-top: 14px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat { background: rgba(15, 23, 42, 0.68); border: 1px solid var(--border); border-radius: 16px; padding: 10px; }
+    .stat-label { color: #93c5fd; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 900; }
+    .stat-value { margin-top: 4px; color: white; font-size: 17px; font-weight: 950; }
+
+    .bottom-tip {
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      max-width: min(820px, calc(100vw - 32px));
+      background: rgba(3, 10, 24, 0.94);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      color: #bfdbfe;
+      font-size: 13px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42), 0 0 24px rgba(56, 189, 248, 0.12);
+      z-index: 5;
+    }
+
+    /* City weather points are rendered as native MapLibre layers, not DOM markers.
+       This keeps them locked to map coordinates during zoom, pitch and rotation. */
+
+
+    #cityOverlay {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 3;
+    }
+
+    .overlay-city-marker {
+      position: absolute;
+      width: 86px;
+      transform: translate(-43px, -100%);
+      pointer-events: auto;
+      filter: drop-shadow(0 10px 18px rgba(2, 6, 23, 0.55));
+      will-change: transform, left, top;
+    }
+
+    .overlay-city-bubble {
+      position: relative;
+      min-width: 76px;
+      padding: 7px 9px 8px;
+      border-radius: 16px;
+      border: 2px solid var(--marker-color);
+      background: rgba(2, 6, 23, 0.86);
+      box-shadow: 0 0 22px var(--marker-glow), inset 0 0 20px rgba(255,255,255,0.04);
+      color: white;
+      text-align: center;
+      backdrop-filter: blur(8px);
+    }
+
+    .overlay-city-bubble::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: -8px;
+      width: 12px;
+      height: 12px;
+      transform: translateX(-50%) rotate(45deg);
+      background: rgba(2, 6, 23, 0.86);
+      border-right: 2px solid var(--marker-color);
+      border-bottom: 2px solid var(--marker-color);
+    }
+
+    .overlay-city-value {
+      font-size: 22px;
+      line-height: 1;
+      font-weight: 950;
+      letter-spacing: -0.04em;
+      color: var(--marker-color);
+      text-shadow: 0 0 14px var(--marker-glow);
+    }
+
+    .overlay-city-unit {
+      font-size: 11px;
+      font-weight: 900;
+      color: #dbeafe;
+      margin-left: 2px;
+    }
+
+    .overlay-city-name {
+      margin-top: 5px;
+      font-size: 11px;
+      font-weight: 850;
+      color: #e0f2fe;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: 0 0 8px rgba(2,6,23,.9);
+    }
+
+    .overlay-city-pin {
+      width: 2px;
+      height: 12px;
+      margin: 7px auto 0;
+      background: var(--marker-color);
+      box-shadow: 0 0 10px var(--marker-glow);
+    }
+
+    .overlay-city-dot {
+      width: 11px;
+      height: 11px;
+      margin: 0 auto;
+      border-radius: 999px;
+      background: white;
+      border: 2px solid #020617;
+      box-shadow: 0 0 0 2px var(--marker-color), 0 0 14px var(--marker-glow);
+    }
+
+    @media (max-width: 640px) {
+      .panel { top: 10px; left: 10px; width: calc(100vw - 20px); padding: 13px; }
+      h1 { font-size: 22px; }
+      .layer-buttons { grid-template-columns: repeat(2, 1fr); }
+      .bottom-tip { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="cityOverlay"></div>
+  <div class="scanlines"></div>
+
+  <main class="panel">
+    <div class="eyebrow">⛰️ Weather Terrain MVP</div>
+    <h1>Várospontos időjárási térkép</h1>
+    <p class="lead">A heatmap helyett a nagyvárosokra kerülnek színezett, olvasható időjárási pontok. Zoomoláskor a látható térképrész városai adják a mintavételezést.</p>
+
+    <div id="mapWarning" class="notice warn hidden"></div>
+    <div id="errorBox" class="notice error hidden"></div>
+
+    <section class="layer-picker">
+      <div class="section-title"><span>Megjelenített adat</span><span id="sampleCount">0 város</span></div>
+      <div class="layer-buttons">
+        <button class="layer-btn selected" data-layer="temperature">Hő</button>
+        <button class="layer-btn" data-layer="rain">Eső</button>
+        <button class="layer-btn" data-layer="wind">Szél</button>
+        <button class="layer-btn" data-layer="snow">Hó</button>
+        <button class="layer-btn" data-layer="cloud">Felhő</button>
+        <button class="layer-btn" data-layer="risk">Kockázat</button>
+      </div>
+    </section>
+
+    <section class="legend">
+      <div class="section-title"><span id="legendTitle">Hőmérséklet</span><span id="legendUnit">°C</span></div>
+      <div id="legendGradient" class="legend-gradient"></div>
+      <div class="legend-scale"><span id="legendMin">-45°</span><span id="legendMid">22°</span><span id="legendMax">+45°</span></div>
+      <div id="legendNote" class="legend-note">Fix hőskála: 22 °C zöld, hidegebb értékek kékbe, melegebb értékek pirosba futnak.</div>
+    </section>
+
+    <section class="stats">
+      <div class="stat"><div class="stat-label">Minimum</div><div id="statMin" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label">Átlag</div><div id="statAvg" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label">Maximum</div><div id="statMax" class="stat-value">–</div></div>
+    </section>
+
+    <section class="control-row"><label>Térképnézet</label><button id="mapBaseBtn" class="active">Bekapcsolva</button></section>
+    <section class="control-row"><label>Várospontok</label><button id="pointsBtn" class="active">Bekapcsolva</button></section>
+
+    <section class="slider-wrap">
+      <div class="slider-head"><span>Domborzat kiemelés</span><span id="terrainLabel">1.5×</span></div>
+      <input id="terrainSlider" type="range" min="0" max="3" step="0.1" value="1.5" />
+    </section>
+  </main>
+
+  <div class="bottom-tip">Zoomolj rá egy régióra: magasabb zoomnál csak a látható térképrészben lévő városok pontjai jelennek meg.</div>
+
+  <script>
+    const MAPTILER_KEY = "aX0oCOi0xeZIkeidagYz";
+    const DEFAULT_CENTER = [19.0402, 47.4979];
+    const DEFAULT_ZOOM = 7;
+    const WORLD_COUNTRIES_URL = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson";
+    const CITY_WEATHER_SOURCE_ID = "city-weather-source";
+    const CITY_WEATHER_CIRCLE_LAYER_ID = "city-weather-circle-layer";
+    const CITY_WEATHER_VALUE_LAYER_ID = "city-weather-value-layer";
+    const CITY_WEATHER_NAME_LAYER_ID = "city-weather-name-layer";
+    const MAX_CITY_POINTS = 32;
+    const WEATHER_POINT_TTL_MS = 10 * 60 * 1000;
+
+    let terrainExaggeration = 1.5;
+    let pointsEnabled = true;
+    let mapBaseEnabled = true;
+    let activeWeatherLayer = "temperature";
+    let map = null;
+    let weatherCache = new Map();
+    let cityWeatherLayersReady = false;
+    let sampleTimer = null;
+    let sampleAbortController = null;
+    let latestCitySamples = [];
+    let latestRenderedMarkerItems = [];
+
+    const CITY_SAMPLES = [
+      citySample("Budapest", 47.4979, 19.0402, "HU"), citySample("Debrecen", 47.5316, 21.6273, "HU"),
+      citySample("Szeged", 46.2530, 20.1414, "HU"), citySample("Miskolc", 48.1035, 20.7784, "HU"),
+      citySample("Pécs", 46.0727, 18.2323, "HU"), citySample("Győr", 47.6875, 17.6347, "HU"),
+      citySample("Nyíregyháza", 47.9495, 21.7244, "HU"), citySample("Kecskemét", 46.8964, 19.6913, "HU"),
+      citySample("Székesfehérvár", 47.1860, 18.4221, "HU"), citySample("Szombathely", 47.2307, 16.6218, "HU"),
+      citySample("Eger", 47.9025, 20.3733, "HU"), citySample("Békéscsaba", 46.6736, 21.0966, "HU"),
+      citySample("Nagykanizsa", 46.4590, 16.9900, "HU"), citySample("Bratislava", 48.1486, 17.1077, "SK"),
+      citySample("Košice", 48.7164, 21.2611, "SK"), citySample("Nitra", 48.3061, 18.0865, "SK"),
+      citySample("Vienna", 48.2082, 16.3738, "AT"), citySample("Graz", 47.0707, 15.4395, "AT"),
+      citySample("Zagreb", 45.8150, 15.9819, "HR"), citySample("Osijek", 45.5549, 18.6955, "HR"),
+      citySample("Ljubljana", 46.0569, 14.5058, "SI"), citySample("Belgrade", 44.7866, 20.4489, "RS"),
+      citySample("Novi Sad", 45.2671, 19.8335, "RS"), citySample("Timișoara", 45.7489, 21.2087, "RO"),
+      citySample("Arad", 46.1866, 21.3123, "RO"), citySample("Oradea", 47.0465, 21.9189, "RO"),
+      citySample("Cluj-Napoca", 46.7712, 23.5899, "RO"), citySample("Sibiu", 45.7983, 24.1213, "RO"),
+      citySample("Brașov", 45.6579, 25.6012, "RO"), citySample("Târgu Mureș", 46.5386, 24.5625, "RO"),
+      citySample("Bucharest", 44.4268, 26.1025, "RO"), citySample("Prague", 50.0755, 14.4378, "CZ"),
+      citySample("Brno", 49.1951, 16.6068, "CZ"), citySample("Kraków", 50.0647, 19.9450, "PL"),
+      citySample("Warsaw", 52.2297, 21.0122, "PL"), citySample("Lviv", 49.8429, 24.0311, "UA"),
+      citySample("Munich", 48.1351, 11.5820, "DE"), citySample("Sarajevo", 43.8563, 18.4131, "BA"),
+      citySample("Podgorica", 42.4304, 19.2629, "ME"), citySample("Trieste", 45.6495, 13.7768, "IT"),
+
+      citySample("Hajdúszoboszló", 47.4430, 21.3910, "HU"),
+      citySample("Balmazújváros", 47.6167, 21.3500, "HU"),
+      citySample("Hajdúböszörmény", 47.6667, 21.5167, "HU"),
+      citySample("Hajdúnánás", 47.8500, 21.4333, "HU"),
+      citySample("Tiszaújváros", 47.9333, 21.0833, "HU"),
+      citySample("Mezőkövesd", 47.8167, 20.5833, "HU"),
+      citySample("Kazincbarcika", 48.2500, 20.6333, "HU"),
+      citySample("Szerencs", 48.1667, 21.2000, "HU"),
+      citySample("Tokaj", 48.1167, 21.4167, "HU"),
+      citySample("Sárospatak", 48.3167, 21.5667, "HU"),
+      citySample("Mátészalka", 47.9500, 22.3167, "HU"),
+      citySample("Kisvárda", 48.2167, 22.0833, "HU"),
+      citySample("Berettyóújfalu", 47.2167, 21.5500, "HU"),
+      citySample("Karcag", 47.3167, 20.9333, "HU"),
+      citySample("Tiszafüred", 47.6167, 20.7667, "HU"),
+      citySample("Jászberény", 47.5000, 19.9167, "HU"),
+      citySample("Hatvan", 47.6667, 19.6833, "HU"),
+      citySample("Gyöngyös", 47.7833, 19.9333, "HU"),
+      citySample("Salgótarján", 48.1000, 19.8000, "HU"),
+      citySample("Ózd", 48.2167, 20.3000, "HU"),
+      citySample("Vác", 47.7833, 19.1333, "HU"),
+      citySample("Esztergom", 47.7833, 18.7333, "HU"),
+      citySample("Tatabánya", 47.5833, 18.4167, "HU"),
+      citySample("Veszprém", 47.1000, 17.9167, "HU"),
+      citySample("Siófok", 46.9000, 18.0500, "HU"),
+      citySample("Kaposvár", 46.3667, 17.8000, "HU"),
+      citySample("Dunaújváros", 46.9667, 18.9333, "HU"),
+      citySample("Baja", 46.1833, 18.9500, "HU"),
+      citySample("Kalocsa", 46.5333, 18.9833, "HU"),
+      citySample("Szekszárd", 46.3500, 18.7000, "HU"),
+      citySample("Hódmezővásárhely", 46.4167, 20.3167, "HU"),
+      citySample("Makó", 46.2167, 20.4833, "HU"),
+      citySample("Orosháza", 46.5667, 20.6667, "HU"),
+      citySample("Gyula", 46.6500, 21.2833, "HU"),
+      citySample("Sopron", 47.6833, 16.5833, "HU"),
+      citySample("Mosonmagyaróvár", 47.8667, 17.2667, "HU"),
+      citySample("Pápa", 47.3333, 17.4667, "HU"),
+      citySample("Zalaegerszeg", 46.8333, 16.8500, "HU"),
+      citySample("Keszthely", 46.7667, 17.2500, "HU"),
+      citySample("Szentgotthárd", 46.9500, 16.2833, "HU"),
+
+      citySample("Carei", 47.6833, 22.4667, "RO"),
+      citySample("Satu Mare", 47.7921, 22.8853, "RO"),
+      citySample("Baia Mare", 47.6597, 23.5681, "RO"),
+      citySample("Zalău", 47.1833, 23.0500, "RO"),
+      citySample("Săcueni", 47.3500, 22.1000, "RO"),
+      citySample("Valea lui Mihai", 47.5167, 22.1333, "RO"),
+      citySample("Mukachevo", 48.4500, 22.7167, "UA"),
+      citySample("Uzhhorod", 48.6167, 22.3000, "UA"),
+      citySample("Michalovce", 48.7500, 21.9167, "SK"),
+      citySample("Trebišov", 48.6333, 21.7167, "SK"),
+      citySample("Rožňava", 48.6667, 20.5333, "SK")
+    ];
+
+    const layerConfig = {
+      temperature: {
+        title: "Hőmérséklet", unit: "°C", minLabel: "-45°", midLabel: "22°", maxLabel: "+45°",
+        gradient: "linear-gradient(90deg, #172554, #1d4ed8, #06b6d4, #22c55e, #f97316, #dc2626, #7f1d1d)"
+      },
+      rain: {
+        title: "Csapadék", unit: "mm", minLabel: "0", midLabel: "1", maxLabel: "8+",
+        gradient: "linear-gradient(90deg, rgba(56,189,248,0.15), #22d3ee, #60a5fa, #a78bfa, #f87171)"
+      },
+      wind: {
+        title: "Szélsebesség", unit: "km/h", minLabel: "0", midLabel: "25", maxLabel: "65+",
+        gradient: "linear-gradient(90deg, #22d3ee, #facc15, #f97316, #dc2626)"
+      },
+      snow: {
+        title: "Havazás", unit: "cm", minLabel: "0", midLabel: "1", maxLabel: "6+",
+        gradient: "linear-gradient(90deg, rgba(147,197,253,0.2), #93c5fd, #e0f2fe, #ffffff)"
+      },
+      cloud: {
+        title: "Felhőzet", unit: "%", minLabel: "0", midLabel: "50", maxLabel: "100",
+        gradient: "linear-gradient(90deg, #facc15, #93c5fd, #cbd5e1, #f8fafc)"
+      },
+      risk: {
+        title: "Outdoor kockázat", unit: "idx", minLabel: "0", midLabel: "3", maxLabel: "6+",
+        gradient: "linear-gradient(90deg, #22c55e, #facc15, #f97316, #dc2626)"
+      }
+    };
+
+    function citySample(name, lat, lng, country) { return { name, lat, lng, country }; }
+    function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+    function round(value, decimals = 1) { if (value === null || value === undefined || Number.isNaN(value)) return "–"; return Number(value).toFixed(decimals); }
+    function setText(id, text) { document.getElementById(id).textContent = text; }
+    function showBox(id, message) {
+      const el = document.getElementById(id);
+      if (!message) { el.classList.add("hidden"); el.textContent = ""; return; }
+      el.classList.remove("hidden"); el.textContent = message;
+    }
+
+    function makeOpenMeteoUrl(lat, lng) {
+      const params = new URLSearchParams({
+        latitude: String(lat),
+        longitude: String(lng),
+        current: ["temperature_2m", "apparent_temperature", "precipitation", "snowfall", "weather_code", "cloud_cover", "wind_speed_10m"].join(","),
+        forecast_days: "1",
+        timezone: "auto"
+      });
+      return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+    }
+
+    function getRiskValue(current) {
+      if (!current) return 0;
+      let score = 0;
+      if ((current.wind_speed_10m || 0) >= 45) score += 3;
+      else if ((current.wind_speed_10m || 0) >= 25) score += 1;
+      if ((current.precipitation || 0) >= 5) score += 3;
+      else if ((current.precipitation || 0) > 0) score += 1;
+      if ((current.snowfall || 0) > 0) score += 2;
+      if ((current.temperature_2m ?? 20) <= 0) score += 1;
+      if (current.weather_code === 45 || current.weather_code === 48) score += 2;
+      return score;
+    }
+
+    function valueForLayer(layer, current) {
+      if (!current) return 0;
+      if (layer === "temperature") return current.temperature_2m ?? 0;
+      if (layer === "rain") return current.precipitation ?? 0;
+      if (layer === "wind") return current.wind_speed_10m ?? 0;
+      if (layer === "snow") return current.snowfall ?? 0;
+      if (layer === "cloud") return current.cloud_cover ?? 0;
+      if (layer === "risk") return getRiskValue(current);
+      return 0;
+    }
+
+    function interpolateColor(stops, value) {
+      if (value <= stops[0][0]) return stops[0][1];
+      for (let i = 0; i < stops.length - 1; i++) {
+        const [v1, c1] = stops[i];
+        const [v2, c2] = stops[i + 1];
+        if (value <= v2) {
+          const t = (value - v1) / (v2 - v1);
+          return [
+            Math.round(c1[0] + (c2[0] - c1[0]) * t),
+            Math.round(c1[1] + (c2[1] - c1[1]) * t),
+            Math.round(c1[2] + (c2[2] - c1[2]) * t)
+          ];
+        }
+      }
+      return stops[stops.length - 1][1];
+    }
+
+    function colorForValue(layer, value) {
+      if (layer === "temperature") {
+        return interpolateColor([
+          [-45, [23, 37, 84]], [0, [37, 99, 235]], [12, [6, 182, 212]],
+          [22, [34, 197, 94]], [32, [249, 115, 22]], [45, [127, 29, 29]]
+        ], value);
+      }
+      if (layer === "rain") {
+        return interpolateColor([[0, [34, 211, 238]], [1, [96, 165, 250]], [4, [167, 139, 250]], [8, [248, 113, 113]]], value);
+      }
+      if (layer === "wind") {
+        return interpolateColor([[0, [34, 211, 238]], [20, [250, 204, 21]], [40, [249, 115, 22]], [65, [220, 38, 38]]], value);
+      }
+      if (layer === "snow") {
+        return interpolateColor([[0, [147, 197, 253]], [1, [224, 242, 254]], [6, [255, 255, 255]]], value);
+      }
+      if (layer === "cloud") {
+        return interpolateColor([[0, [250, 204, 21]], [35, [147, 197, 253]], [75, [203, 213, 225]], [100, [248, 250, 252]]], value);
+      }
+      return interpolateColor([[0, [34, 197, 94]], [2, [250, 204, 21]], [4, [249, 115, 22]], [6, [220, 38, 38]]], value);
+    }
+
+    function iconForLayer(layer, value) {
+      if (layer === "temperature") return "°";
+      if (layer === "rain") return value > 0.1 ? "☔" : "○";
+      if (layer === "wind") return "➤";
+      if (layer === "snow") return value > 0.1 ? "❄" : "○";
+      if (layer === "cloud") return "☁";
+      return value >= 4 ? "!" : "•";
+    }
+
+    function formatValue(layer, value) {
+      if (layer === "temperature") return round(value, 0);
+      if (layer === "rain") return round(value, 1);
+      if (layer === "wind") return round(value, 0);
+      if (layer === "snow") return round(value, 1);
+      if (layer === "cloud") return round(value, 0);
+      return round(value, 0);
+    }
+
+    function markerOpacity(layer, value) {
+      if (layer === "rain" && value <= 0.05) return 0.45;
+      if (layer === "snow" && value <= 0.03) return 0.45;
+      if (layer === "wind" && value <= 5) return 0.55;
+      if (layer === "risk" && value <= 0) return 0.45;
+      return 1;
+    }
+
+    function buildMapStyle() {
+      return {
+        version: 8,
+        glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+        sources: {
+          base: {
+            type: "raster",
+            tiles: [`https://api.maptiler.com/maps/outdoor-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`],
+            tileSize: 256,
+            attribution: "© MapTiler © OpenStreetMap contributors"
+          },
+          countries: { type: "geojson", data: WORLD_COUNTRIES_URL },
+          terrain: {
+            type: "raster-dem",
+            tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+            tileSize: 256,
+            encoding: "terrarium",
+            attribution: "DEM tiles © AWS / Mapzen"
+          }
+        },
+        layers: [
+          { id: "background", type: "background", paint: { "background-color": "#071724" } },
+          {
+            id: "base",
+            type: "raster",
+            source: "base",
+            paint: {
+              "raster-saturation": -0.25,
+              "raster-brightness-min": 0.08,
+              "raster-brightness-max": 0.76,
+              "raster-contrast": 0.08
+            }
+          },
+          {
+            id: "hillshade",
+            type: "hillshade",
+            source: "terrain",
+            paint: {
+              "hillshade-shadow-color": "#020617",
+              "hillshade-highlight-color": "#7dd3fc",
+              "hillshade-accent-color": "#38bdf8",
+              "hillshade-exaggeration": 0.45
+            }
+          },
+          {
+            id: "country-lines",
+            type: "line",
+            source: "countries",
+            paint: {
+              "line-color": "rgba(255,255,255,0.52)",
+              "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.8, 8, 1.4, 11, 2.1],
+              "line-blur": 0.15
+            }
+          }
+        ]
+      };
+    }
+
+    function initMap() {
+      map = new maplibregl.Map({
+        container: "map",
+        center: DEFAULT_CENTER,
+        zoom: DEFAULT_ZOOM,
+        pitch: 45,
+        bearing: -12,
+        antialias: true,
+        style: buildMapStyle()
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+      map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
+
+      map.on("load", () => {
+        if (map.getSource("terrain")) {
+          map.setTerrain({ source: "terrain", exaggeration: terrainExaggeration });
+          map.setSky({
+            "sky-color": "#020617",
+            "sky-horizon-blend": 0.3,
+            "horizon-color": "#082f49",
+            "horizon-fog-blend": 0.55,
+            "fog-color": "#0f172a",
+            "fog-ground-blend": 0.65
+          });
+        }
+        updateLegend();
+        refreshCityWeather();
+        map.on("render", updateCityMarkerPositions);
+      });
+
+      map.on("moveend", scheduleCityWeather);
+      map.on("zoomend", scheduleCityWeather);
+    }
+
+    function scheduleCityWeather() {
+      if (sampleTimer) clearTimeout(sampleTimer);
+      sampleTimer = setTimeout(refreshCityWeather, 350);
+    }
+
+    function getVisibleCities() {
+      if (!map) return [];
+      const bounds = map.getBounds();
+      const zoom = map.getZoom();
+      const center = map.getCenter();
+
+      const width = Math.abs(bounds.getEast() - bounds.getWest());
+      const height = Math.abs(bounds.getNorth() - bounds.getSouth());
+
+      // Low zoom gets a small padding so edge cities are not flickering.
+      // High zoom uses the actual visible area.
+      const padFactor = zoom < 7 ? 0.12 : zoom < 9 ? 0.05 : 0;
+      const padLng = width * padFactor;
+      const padLat = height * padFactor;
+
+      const distanceToCenter = (city) => {
+        const dx = city.lng - center.lng;
+        const dy = city.lat - center.lat;
+        return Math.sqrt(dx * dx + dy * dy);
+      };
+
+      const visible = CITY_SAMPLES
+        .filter((city) =>
+          city.lng >= bounds.getWest() - padLng &&
+          city.lng <= bounds.getEast() + padLng &&
+          city.lat >= bounds.getSouth() - padLat &&
+          city.lat <= bounds.getNorth() + padLat
+        )
+        .sort((a, b) => distanceToCenter(a) - distanceToCenter(b));
+
+      // At close zoom: only show cities that are truly in the viewport.
+      if (zoom >= 8.5) return visible.slice(0, MAX_CITY_POINTS);
+
+      // At wider zoom: keep at least 3 points so the map is not empty.
+      if (visible.length >= 3) return visible.slice(0, MAX_CITY_POINTS);
+
+      const used = new Set(visible.map((city) => city.name));
+      const nearest = CITY_SAMPLES
+        .filter((city) => !used.has(city.name))
+        .sort((a, b) => distanceToCenter(a) - distanceToCenter(b));
+
+      return visible.concat(nearest.slice(0, 3 - visible.length)).slice(0, MAX_CITY_POINTS);
+    }
+
+    function cacheKey(city) { return `${city.lat.toFixed(2)},${city.lng.toFixed(2)}`; }
+
+    async function fetchCityWeather(city, signal) {
+      const key = cacheKey(city);
+      const cached = weatherCache.get(key);
+      if (cached && Date.now() - cached.time < WEATHER_POINT_TTL_MS) {
+        return { ...cached.value, ...city };
+      }
+
+      const response = await fetch(makeOpenMeteoUrl(city.lat, city.lng), { signal });
+      if (!response.ok) throw new Error(`Open-Meteo hiba: ${response.status}`);
+      const data = await response.json();
+      const value = { ...city, current: data.current };
+      weatherCache.set(key, { time: Date.now(), value });
+      return value;
+    }
+
+    async function refreshCityWeather() {
+      if (!map || !map.isStyleLoaded()) return;
+      if (!pointsEnabled) {
+        clearCityMarkers();
+        setText("sampleCount", "0 város");
+        updateStats([]);
+        return;
+      }
+
+      if (sampleAbortController) sampleAbortController.abort();
+      sampleAbortController = new AbortController();
+      const signal = sampleAbortController.signal;
+      const cities = getVisibleCities();
+
+      showBox("errorBox", "");
+      setText("sampleCount", `${cities.length} város frissül`);
+      renderCityPlaceholders(cities);
+
+      const results = [];
+      const settled = await Promise.allSettled(cities.map(async (city) => {
+        const weather = await fetchCityWeather(city, signal);
+        if (signal.aborted) return;
+        results.push(weather);
+        renderCityMarkers(results);
+        updateStats(results.map(cityWeatherToSample));
+        setText("sampleCount", `${results.length}/${cities.length} város`);
+      }));
+
+      if (signal.aborted) return;
+      latestCitySamples = results;
+      renderCityMarkers(results);
+      updateStats(results.map(cityWeatherToSample));
+      setText("sampleCount", `${results.length} város`);
+
+      if (!results.length) {
+        const firstError = settled.find((item) => item.status === "rejected");
+        const message = firstError && firstError.reason && firstError.reason.message
+          ? firstError.reason.message
+          : "Nem sikerült városi időjárásadatokat lekérni ehhez a nézethez.";
+        showBox("errorBox", message);
+      }
+    }
+
+    function cityWeatherToSample(item) {
+      return { value: valueForLayer(activeWeatherLayer, item.current) };
+    }
+
+    function clearCityMarkers() {
+      const overlay = document.getElementById("cityOverlay");
+      if (overlay) overlay.innerHTML = "";
+    }
+
+    function renderCityPlaceholders(cities) {
+      if (!map || !pointsEnabled) return;
+      const placeholderItems = cities.map((city) => ({
+        ...city,
+        current: null,
+        placeholder: true
+      }));
+      renderCityMarkers(placeholderItems);
+    }
+
+    function renderCityMarkers(items) {
+      latestRenderedMarkerItems = items.slice();
+      const overlay = document.getElementById("cityOverlay");
+      if (!overlay) return;
+
+      if (!pointsEnabled) {
+        overlay.innerHTML = "";
+        return;
+      }
+
+      overlay.innerHTML = items.map((item, index) => {
+        const hasWeather = Boolean(item.current);
+        const value = hasWeather ? valueForLayer(activeWeatherLayer, item.current) : 0;
+        const [r, g, b] = hasWeather ? colorForValue(activeWeatherLayer, value) : [148, 163, 184];
+        const color = `rgb(${r}, ${g}, ${b})`;
+        const glow = `rgba(${r}, ${g}, ${b}, 0.55)`;
+        const unit = hasWeather ? layerConfig[activeWeatherLayer].unit : "";
+        const label = hasWeather ? `${formatValue(activeWeatherLayer, value)}${unit}` : "…";
+        const opacity = hasWeather ? markerOpacity(activeWeatherLayer, value) : 0.72;
+
+        return `
+          <div class="overlay-city-marker" data-marker-index="${index}" style="--marker-color:${color}; --marker-glow:${glow}; opacity:${opacity}">
+            <div class="overlay-city-bubble" title="${item.name}">
+              <div><span class="overlay-city-value">${label}</span></div>
+              <div class="overlay-city-name">${item.name}</div>
+            </div>
+            <div class="overlay-city-pin"></div>
+            <div class="overlay-city-dot"></div>
+          </div>
+        `;
+      }).join("");
+
+      updateCityMarkerPositions();
+    }
+
+    function updateCityMarkerPositions() {
+      if (!map || !latestRenderedMarkerItems || !latestRenderedMarkerItems.length) return;
+      const overlay = document.getElementById("cityOverlay");
+      if (!overlay) return;
+
+      const width = map.getContainer().clientWidth;
+      const height = map.getContainer().clientHeight;
+      const markers = overlay.querySelectorAll(".overlay-city-marker");
+
+      markers.forEach((el) => {
+        const index = Number(el.dataset.markerIndex);
+        const item = latestRenderedMarkerItems[index];
+        if (!item) {
+          el.style.display = "none";
+          return;
+        }
+
+        const point = map.project([item.lng, item.lat]);
+        const margin = 120;
+        const visible = point.x > -margin && point.x < width + margin && point.y > -margin && point.y < height + margin;
+
+        el.style.display = visible ? "block" : "none";
+        el.style.left = `${point.x}px`;
+        el.style.top = `${point.y}px`;
+      });
+    }
+
+    function updateLegend() {
+      const c = layerConfig[activeWeatherLayer];
+      setText("legendTitle", c.title);
+      setText("legendUnit", c.unit);
+      setText("legendMin", c.minLabel);
+      setText("legendMid", c.midLabel);
+      setText("legendMax", c.maxLabel);
+      document.getElementById("legendGradient").style.background = c.gradient;
+      setText("legendNote", activeWeatherLayer === "temperature"
+        ? "Fix hőskála: 22 °C zöld; hidegebb értékek kékbe, melegebb értékek pirosba futnak."
+        : "A városjelölők az adott város aktuális értékét mutatják.");
+    }
+
+    function updateStats(samples) {
+      if (!samples.length) {
+        setText("statMin", "–");
+        setText("statAvg", "–");
+        setText("statMax", "–");
+        return;
+      }
+      const values = samples.map((s) => s.value).filter(Number.isFinite);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const avg = values.reduce((a, b) => a + b, 0) / values.length;
+      const unit = layerConfig[activeWeatherLayer].unit;
+      const decimals = activeWeatherLayer === "temperature" || activeWeatherLayer === "rain" || activeWeatherLayer === "snow" ? 1 : 0;
+      setText("statMin", `${round(min, decimals)} ${unit}`);
+      setText("statAvg", `${round(avg, decimals)} ${unit}`);
+      setText("statMax", `${round(max, decimals)} ${unit}`);
+    }
+
+    function setBaseMapVisibility(visible) {
+      if (!map) return;
+      const visibility = visible ? "visible" : "none";
+      ["base", "country-lines"].forEach((id) => {
+        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
+      });
+    }
+
+    function bindControls() {
+      document.getElementById("mapBaseBtn").addEventListener("click", () => {
+        mapBaseEnabled = !mapBaseEnabled;
+        const btn = document.getElementById("mapBaseBtn");
+        btn.textContent = mapBaseEnabled ? "Bekapcsolva" : "Kikapcsolva";
+        btn.classList.toggle("active", mapBaseEnabled);
+        setBaseMapVisibility(mapBaseEnabled);
+      });
+
+      document.getElementById("pointsBtn").addEventListener("click", () => {
+        pointsEnabled = !pointsEnabled;
+        const btn = document.getElementById("pointsBtn");
+        btn.textContent = pointsEnabled ? "Bekapcsolva" : "Kikapcsolva";
+        btn.classList.toggle("active", pointsEnabled);
+        if (pointsEnabled) refreshCityWeather();
+        else {
+          clearCityMarkers();
+          updateStats([]);
+          setText("sampleCount", "0 város");
+        }
+      });
+
+      document.querySelectorAll(".layer-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+          activeWeatherLayer = button.dataset.layer;
+          document.querySelectorAll(".layer-btn").forEach((b) => b.classList.remove("selected"));
+          button.classList.add("selected");
+          updateLegend();
+          renderCityMarkers(latestCitySamples);
+          updateStats(latestCitySamples.map(cityWeatherToSample));
+        });
+      });
+
+      document.getElementById("terrainSlider").addEventListener("input", (event) => {
+        terrainExaggeration = Number(event.target.value);
+        setText("terrainLabel", `${terrainExaggeration.toFixed(1)}×`);
+        if (map && map.isStyleLoaded() && map.getSource("terrain")) {
+          map.setTerrain({ source: "terrain", exaggeration: terrainExaggeration });
+        }
+      });
+    }
+
+    function runSelfTests() {
+      console.assert(round(null) === "–", "Null values should render as dash");
+      console.assert(colorForValue("temperature", 22)[1] === 197, "22 C should map to green");
+      console.assert(CITY_SAMPLES.length >= 70, "City sample list should provide dense regional coverage");
+      console.assert(valueForLayer("cloud", { cloud_cover: 86 }) === 86, "Cloud value should be extracted");
+      console.assert(MAX_CITY_POINTS <= 32, "Frontend-only city sample count should stay responsive");
+      console.assert(typeof renderCityMarkers === "function", "City marker renderer should exist");
+      console.assert(typeof updateCityMarkerPositions === "function", "City weather overlay must update marker screen positions");
+    }
+
+    runSelfTests();
+    bindControls();
+    initMap();
+  </script>
+</body>
+</html>

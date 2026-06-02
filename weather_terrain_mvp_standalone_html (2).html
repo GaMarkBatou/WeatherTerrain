@@ -1,0 +1,1112 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Weather Terrain MVP - Holographic Layers</title>
+
+  <link href="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.js"></script>
+
+  <style>
+    :root {
+      --bg: #020617;
+      --panel: rgba(3, 10, 24, 0.82);
+      --panel-strong: rgba(3, 10, 24, 0.94);
+      --text: #e0f2fe;
+      --muted: #93c5fd;
+      --faint: #64748b;
+      --border: rgba(125, 211, 252, 0.24);
+      --cyan: #38bdf8;
+      --cyan-2: #22d3ee;
+      --green: #34d399;
+      --yellow: #facc15;
+      --orange: #fb923c;
+      --red: #f87171;
+      --blue: #60a5fa;
+      --violet: #a78bfa;
+      --shadow: rgba(8, 47, 73, 0.55);
+      --warn-bg: rgba(120, 53, 15, 0.82);
+      --warn-text: #fde68a;
+      --error-bg: rgba(127, 29, 29, 0.82);
+      --error-text: #fecaca;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    #map {
+      position: fixed;
+      inset: 0;
+      background: #020617;
+    }
+
+    .panel {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: min(450px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      overflow: auto;
+      background: linear-gradient(145deg, rgba(3, 10, 24, 0.92), rgba(8, 47, 73, 0.72));
+      backdrop-filter: blur(18px) saturate(1.25);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 16px;
+      box-shadow: 0 24px 90px rgba(0, 0, 0, 0.55), 0 0 40px rgba(56, 189, 248, 0.13);
+      z-index: 5;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-shadow: 0 0 12px rgba(56, 189, 248, 0.45);
+    }
+
+    h1 {
+      margin: 6px 0 4px;
+      font-size: 26px;
+      line-height: 1.08;
+      color: white;
+    }
+
+    .lead {
+      margin: 0;
+      color: #bfdbfe;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .status-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 18px;
+      border: 1px solid rgba(125, 211, 252, 0.32);
+      background: rgba(15, 23, 42, 0.85);
+      display: grid;
+      place-items: center;
+      font-size: 28px;
+      flex: 0 0 auto;
+      box-shadow: inset 0 0 22px rgba(56, 189, 248, 0.12), 0 0 26px rgba(56, 189, 248, 0.12);
+    }
+
+    .notice {
+      margin-top: 12px;
+      padding: 12px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .notice.warn { background: var(--warn-bg); color: var(--warn-text); }
+    .notice.error { background: var(--error-bg); color: var(--error-text); }
+    .hidden { display: none !important; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .metric {
+      background: rgba(15, 23, 42, 0.68);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      box-shadow: inset 0 0 22px rgba(56, 189, 248, 0.05), 0 8px 28px rgba(0, 0, 0, 0.18);
+    }
+
+    .metric-label {
+      color: #93c5fd;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 900;
+    }
+
+    .metric-value {
+      margin-top: 5px;
+      font-size: 19px;
+      font-weight: 900;
+      color: white;
+    }
+
+    .summary {
+      margin-top: 14px;
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .summary-title {
+      font-size: 14px;
+      font-weight: 900;
+      color: white;
+    }
+
+    .summary-subtitle {
+      margin-top: 3px;
+      font-size: 13px;
+      color: #bfdbfe;
+    }
+
+    button {
+      border: 1px solid rgba(125, 211, 252, 0.28);
+      cursor: pointer;
+      border-radius: 13px;
+      padding: 9px 12px;
+      font-weight: 900;
+      background: rgba(14, 165, 233, 0.18);
+      color: #e0f2fe;
+      box-shadow: 0 0 18px rgba(56, 189, 248, 0.12);
+    }
+
+    button.secondary {
+      background: rgba(15, 23, 42, 0.7);
+      color: #bfdbfe;
+    }
+
+    button.active {
+      background: rgba(14, 165, 233, 0.35);
+      color: white;
+      border-color: rgba(125, 211, 252, 0.52);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    .layer-picker {
+      margin-top: 14px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.62);
+    }
+
+    .layer-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      font-size: 14px;
+      font-weight: 900;
+    }
+
+    .layer-buttons {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .layer-btn {
+      padding: 9px 8px;
+      border-radius: 14px;
+      font-size: 12px;
+      text-align: center;
+      background: rgba(15, 23, 42, 0.72);
+    }
+
+    .layer-btn.selected {
+      background: rgba(34, 211, 238, 0.24);
+      border-color: rgba(103, 232, 249, 0.72);
+      color: white;
+    }
+
+    .control-row {
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      background: rgba(15, 23, 42, 0.62);
+    }
+
+    .control-row label {
+      font-size: 14px;
+      font-weight: 850;
+    }
+
+    .slider-wrap {
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.62);
+    }
+
+    .slider-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      font-weight: 850;
+      margin-bottom: 8px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: #22d3ee;
+    }
+
+    .coords {
+      margin-top: 14px;
+      background: rgba(2, 6, 23, 0.94);
+      color: white;
+      border: 1px solid rgba(125, 211, 252, 0.24);
+      border-radius: 18px;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .bottom-tip {
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      max-width: min(650px, calc(100vw - 32px));
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 12px;
+      color: #bfdbfe;
+      font-size: 13px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42), 0 0 24px rgba(56, 189, 248, 0.12);
+      z-index: 5;
+    }
+
+    .marker-dot {
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      background: white;
+      border: 3px solid #0f172a;
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.4), 0 0 25px rgba(56, 189, 248, 0.8), 0 10px 25px rgba(0, 0, 0, 0.25);
+    }
+
+    .wx-marker {
+      position: relative;
+      width: 76px;
+      height: 76px;
+      pointer-events: none;
+      filter: drop-shadow(0 0 14px rgba(56, 189, 248, 0.38));
+    }
+
+    .wx-inner {
+      position: absolute;
+      inset: 0;
+      transform-origin: center center;
+    }
+
+    .wx-ring {
+      position: absolute;
+      inset: 2px;
+      border-radius: 999px;
+      border: 2px solid var(--wx-color, #38bdf8);
+      background: radial-gradient(circle, var(--wx-fill, rgba(56, 189, 248, 0.2)) 0%, rgba(2, 6, 23, 0.08) 62%, rgba(2, 6, 23, 0) 72%);
+      box-shadow: 0 0 16px var(--wx-glow, rgba(56, 189, 248, 0.35)), inset 0 0 16px rgba(255,255,255,0.08);
+      opacity: 0.88;
+    }
+
+    .wx-ring::before,
+    .wx-ring::after {
+      content: "";
+      position: absolute;
+      inset: 8px;
+      border-radius: 999px;
+      border: 1px dashed var(--wx-color, #38bdf8);
+      opacity: 0.55;
+    }
+
+    .wx-ring::after {
+      inset: 17px;
+      opacity: 0.32;
+    }
+
+    .wx-icon {
+      position: absolute;
+      top: 16px;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-size: 20px;
+      line-height: 1;
+      text-shadow: 0 0 12px rgba(255,255,255,0.45);
+    }
+
+    .wx-value {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 15px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 950;
+      color: white;
+      text-shadow: 0 0 10px rgba(2, 6, 23, 0.8);
+      letter-spacing: -0.02em;
+    }
+
+    .wx-wind-arrow {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 2px;
+      height: 31px;
+      transform-origin: 50% 85%;
+      background: var(--wx-color, #38bdf8);
+      border-radius: 999px;
+      box-shadow: 0 0 14px var(--wx-glow, rgba(56, 189, 248, 0.45));
+    }
+
+    .wx-wind-arrow::before {
+      content: "";
+      position: absolute;
+      top: -2px;
+      left: -5px;
+      width: 0;
+      height: 0;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-bottom: 10px solid var(--wx-color, #38bdf8);
+    }
+
+    .scanlines {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 4;
+      background: repeating-linear-gradient(to bottom, rgba(255,255,255,0.03), rgba(255,255,255,0.03) 1px, transparent 1px, transparent 5px);
+      mix-blend-mode: overlay;
+      opacity: 0.22;
+    }
+
+    @media (max-width: 640px) {
+      .panel {
+        top: 10px;
+        left: 10px;
+        width: calc(100vw - 20px);
+        padding: 13px;
+      }
+
+      h1 { font-size: 22px; }
+      .grid { grid-template-columns: 1fr; }
+      .layer-buttons { grid-template-columns: repeat(2, 1fr); }
+      .bottom-tip { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="scanlines"></div>
+
+  <main class="panel">
+    <section class="header">
+      <div>
+        <div class="eyebrow">⛰️ Weather Terrain MVP</div>
+        <h1>Holografikus időjárás térkép</h1>
+        <p class="lead">Válassz térképréteget: hőmérséklet, eső, szél, hó, felhőzet vagy állapot. A viewport mintapontjai közvetlenül Open-Meteo-ból frissülnek.</p>
+      </div>
+      <div id="statusIcon" class="status-icon">⏳</div>
+    </section>
+
+    <div id="mapWarning" class="notice warn hidden"></div>
+    <div id="errorBox" class="notice error hidden"></div>
+
+    <section class="layer-picker">
+      <div class="layer-title">
+        <span>Térképen megjelenített adat</span>
+        <span id="sampleCount">0 pont</span>
+      </div>
+      <div class="layer-buttons">
+        <button class="layer-btn selected" data-layer="condition">Állapot</button>
+        <button class="layer-btn" data-layer="temperature">Hő</button>
+        <button class="layer-btn" data-layer="rain">Eső</button>
+        <button class="layer-btn" data-layer="wind">Szél</button>
+        <button class="layer-btn" data-layer="snow">Hó</button>
+        <button class="layer-btn" data-layer="cloud">Felhő</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="metric"><div class="metric-label">Hőmérséklet</div><div id="temp" class="metric-value">–</div></div>
+      <div class="metric"><div class="metric-label">Hőérzet</div><div id="feels" class="metric-value">–</div></div>
+      <div class="metric"><div class="metric-label">Felhőzet</div><div id="cloud" class="metric-value">–</div></div>
+      <div class="metric"><div class="metric-label">Csapadék</div><div id="precip" class="metric-value">–</div></div>
+      <div class="metric"><div class="metric-label">Hó</div><div id="snow" class="metric-value">–</div></div>
+      <div class="metric"><div class="metric-label">Szél</div><div id="wind" class="metric-value">–</div></div>
+    </section>
+
+    <section class="summary">
+      <div>
+        <div id="condition" class="summary-title">Állapot: –</div>
+        <div id="risk" class="summary-subtitle">Outdoor kockázat: –</div>
+      </div>
+      <button id="flyBtn">Ugrás pontra</button>
+    </section>
+
+    <section class="control-row">
+      <label>Radar overlay</label>
+      <button id="radarBtn" class="secondary">Kikapcsolva</button>
+    </section>
+
+    <section class="control-row">
+      <label>Mintapontok</label>
+      <button id="sampleBtn" class="active">Bekapcsolva</button>
+    </section>
+
+    <section class="slider-wrap">
+      <div class="slider-head">
+        <span>Domborzat kiemelés</span>
+        <span id="terrainLabel">1.5×</span>
+      </div>
+      <input id="terrainSlider" type="range" min="0" max="3" step="0.1" value="1.5" />
+    </section>
+
+    <div id="coords" class="coords">Koordináta: –</div>
+  </main>
+
+  <div class="bottom-tip">Tipp: közelíts rá egy régióra, majd válts réteget. A radar külön overlay, a mintapontos réteg pedig hő/eső/szél/hó/felhő/állapot adatot jelenít meg közvetlenül a térképen.</div>
+
+  <script>
+    const MAPTILER_KEY = "aX0oCOi0xeZIkeidagYz";
+
+    const DEFAULT_CENTER = [19.0402, 47.4979];
+    const DEFAULT_ZOOM = 8;
+    const RAINVIEWER_API = "https://api.rainviewer.com/public/weather-maps.json";
+    const MAX_WEATHER_POINTS = 18;
+    const WEATHER_POINT_TTL_MS = 10 * 60 * 1000;
+
+    let selectedPoint = { lng: DEFAULT_CENTER[0], lat: DEFAULT_CENTER[1] };
+    let terrainExaggeration = 1.5;
+    let terrainAvailable = hasValidMapTilerKey(MAPTILER_KEY);
+    let radarEnabled = false;
+    let radarFrame = null;
+    let sampleEnabled = true;
+    let activeWeatherLayer = "condition";
+    let marker = null;
+    let map = null;
+    let weatherMarkers = [];
+    let weatherCache = new Map();
+    let sampleTimer = null;
+    let sampleAbortController = null;
+
+    function hasValidMapTilerKey(key) {
+      return Boolean(key && key.trim() && key !== "REPLACE_WITH_YOUR_MAPTILER_KEY");
+    }
+
+    function weatherLabel(code) {
+      const labels = {
+        0: ["Derült", "☀️"],
+        1: ["Többnyire napos", "🌤️"],
+        2: ["Többnyire napos", "🌤️"],
+        3: ["Felhős", "☁️"],
+        45: ["Ködös", "🌫️"],
+        48: ["Ködös", "🌫️"],
+        51: ["Szitálás", "🌧️"],
+        53: ["Szitálás", "🌧️"],
+        55: ["Szitálás", "🌧️"],
+        56: ["Szitálás", "🌧️"],
+        57: ["Szitálás", "🌧️"],
+        61: ["Esős", "🌧️"],
+        63: ["Esős", "🌧️"],
+        65: ["Esős", "🌧️"],
+        66: ["Esős", "🌧️"],
+        67: ["Esős", "🌧️"],
+        71: ["Havas", "🌨️"],
+        73: ["Havas", "🌨️"],
+        75: ["Havas", "🌨️"],
+        77: ["Havas", "🌨️"],
+        80: ["Zápor", "🌦️"],
+        81: ["Zápor", "🌦️"],
+        82: ["Zápor", "🌦️"],
+        85: ["Hózápor", "🌨️"],
+        86: ["Hózápor", "🌨️"],
+        95: ["Zivatar", "⛈️"],
+        96: ["Zivatar", "⛈️"],
+        99: ["Zivatar", "⛈️"],
+      };
+      return labels[code] || ["Ismeretlen", "☁️"];
+    }
+
+    function round(value, decimals = 1) {
+      if (value === null || value === undefined || Number.isNaN(value)) return "–";
+      return Number(value).toFixed(decimals);
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function makeOpenMeteoUrl(lat, lng) {
+      const params = new URLSearchParams({
+        latitude: String(lat),
+        longitude: String(lng),
+        current: [
+          "temperature_2m",
+          "relative_humidity_2m",
+          "apparent_temperature",
+          "precipitation",
+          "rain",
+          "snowfall",
+          "weather_code",
+          "cloud_cover",
+          "wind_speed_10m",
+          "wind_direction_10m",
+        ].join(","),
+        forecast_days: "1",
+        timezone: "auto",
+      });
+
+      return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+    }
+
+    function getRisk(current) {
+      if (!current) return { label: "Nincs adat", score: 0 };
+
+      let score = 0;
+      if ((current.wind_speed_10m || 0) >= 45) score += 3;
+      else if ((current.wind_speed_10m || 0) >= 25) score += 1;
+      if ((current.precipitation || 0) >= 5) score += 3;
+      else if ((current.precipitation || 0) > 0) score += 1;
+      if ((current.snowfall || 0) > 0) score += 2;
+      if ((current.temperature_2m ?? 20) <= 0) score += 1;
+      if (current.weather_code === 45 || current.weather_code === 48) score += 2;
+
+      if (score >= 5) return { label: "Magas", score };
+      if (score >= 2) return { label: "Közepes", score };
+      return { label: "Alacsony", score };
+    }
+
+    function setText(id, text) {
+      document.getElementById(id).textContent = text;
+    }
+
+    function showBox(id, message) {
+      const el = document.getElementById(id);
+      if (!message) {
+        el.classList.add("hidden");
+        el.textContent = "";
+        return;
+      }
+      el.classList.remove("hidden");
+      el.textContent = message;
+    }
+
+    function colorForLayer(layer, current) {
+      if (!current) return ["#38bdf8", "rgba(56, 189, 248, 0.18)", "rgba(56, 189, 248, 0.36)"];
+
+      if (layer === "temperature") {
+        const t = current.temperature_2m ?? 0;
+        if (t <= 0) return ["#60a5fa", "rgba(96, 165, 250, 0.22)", "rgba(96, 165, 250, 0.55)"];
+        if (t <= 12) return ["#22d3ee", "rgba(34, 211, 238, 0.22)", "rgba(34, 211, 238, 0.5)"];
+        if (t <= 24) return ["#34d399", "rgba(52, 211, 153, 0.22)", "rgba(52, 211, 153, 0.5)"];
+        if (t <= 32) return ["#facc15", "rgba(250, 204, 21, 0.22)", "rgba(250, 204, 21, 0.55)"];
+        return ["#f87171", "rgba(248, 113, 113, 0.24)", "rgba(248, 113, 113, 0.62)"];
+      }
+
+      if (layer === "rain") {
+        const p = current.precipitation ?? 0;
+        if (p <= 0) return ["#38bdf8", "rgba(56, 189, 248, 0.13)", "rgba(56, 189, 248, 0.28)"];
+        if (p < 1) return ["#22d3ee", "rgba(34, 211, 238, 0.22)", "rgba(34, 211, 238, 0.48)"];
+        if (p < 5) return ["#60a5fa", "rgba(96, 165, 250, 0.25)", "rgba(96, 165, 250, 0.58)"];
+        return ["#a78bfa", "rgba(167, 139, 250, 0.3)", "rgba(167, 139, 250, 0.7)"];
+      }
+
+      if (layer === "wind") {
+        const w = current.wind_speed_10m ?? 0;
+        if (w < 12) return ["#34d399", "rgba(52, 211, 153, 0.18)", "rgba(52, 211, 153, 0.42)"];
+        if (w < 28) return ["#22d3ee", "rgba(34, 211, 238, 0.22)", "rgba(34, 211, 238, 0.55)"];
+        if (w < 45) return ["#facc15", "rgba(250, 204, 21, 0.24)", "rgba(250, 204, 21, 0.62)"];
+        return ["#f87171", "rgba(248, 113, 113, 0.28)", "rgba(248, 113, 113, 0.75)"];
+      }
+
+      if (layer === "snow") {
+        const s = current.snowfall ?? 0;
+        if (s <= 0) return ["#93c5fd", "rgba(147, 197, 253, 0.12)", "rgba(147, 197, 253, 0.3)"];
+        return ["#e0f2fe", "rgba(224, 242, 254, 0.3)", "rgba(224, 242, 254, 0.72)"];
+      }
+
+      if (layer === "cloud") {
+        const c = current.cloud_cover ?? 0;
+        if (c < 30) return ["#facc15", "rgba(250, 204, 21, 0.17)", "rgba(250, 204, 21, 0.38)"];
+        if (c < 70) return ["#93c5fd", "rgba(147, 197, 253, 0.2)", "rgba(147, 197, 253, 0.45)"];
+        return ["#cbd5e1", "rgba(203, 213, 225, 0.25)", "rgba(203, 213, 225, 0.58)"];
+      }
+
+      const code = current.weather_code;
+      if ([45, 48].includes(code)) return ["#cbd5e1", "rgba(203, 213, 225, 0.25)", "rgba(203, 213, 225, 0.55)"];
+      if ([61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99].includes(code)) return ["#60a5fa", "rgba(96, 165, 250, 0.25)", "rgba(96, 165, 250, 0.58)"];
+      if ([71, 73, 75, 77, 85, 86].includes(code)) return ["#e0f2fe", "rgba(224, 242, 254, 0.28)", "rgba(224, 242, 254, 0.66)"];
+      if ([0, 1, 2].includes(code)) return ["#facc15", "rgba(250, 204, 21, 0.2)", "rgba(250, 204, 21, 0.48)"];
+      return ["#38bdf8", "rgba(56, 189, 248, 0.18)", "rgba(56, 189, 248, 0.36)"];
+    }
+
+    function valueForLayer(layer, current) {
+      if (!current) return { icon: "·", value: "–", direction: 0 };
+      if (layer === "temperature") return { icon: "°", value: `${round(current.temperature_2m, 0)}°`, direction: 0 };
+      if (layer === "rain") return { icon: "☔", value: `${round(current.precipitation, 1)}`, direction: 0 };
+      if (layer === "wind") return { icon: "", value: `${round(current.wind_speed_10m, 0)}`, direction: current.wind_direction_10m || 0 };
+      if (layer === "snow") return { icon: "❄", value: `${round(current.snowfall, 1)}`, direction: 0 };
+      if (layer === "cloud") return { icon: "☁", value: `${round(current.cloud_cover, 0)}%`, direction: 0 };
+      const [label, icon] = weatherLabel(current.weather_code);
+      return { icon, value: shortCondition(label), direction: 0 };
+    }
+
+    function shortCondition(label) {
+      const map = {
+        "Derült": "SUN",
+        "Többnyire napos": "SUN",
+        "Felhős": "CLD",
+        "Ködös": "FOG",
+        "Szitálás": "DRZ",
+        "Esős": "RAIN",
+        "Zápor": "SHW",
+        "Havas": "SNOW",
+        "Hózápor": "SNW",
+        "Zivatar": "STM",
+      };
+      return map[label] || "WX";
+    }
+
+    function sizeForLayer(layer, current) {
+      if (!current) return 0.85;
+      if (layer === "temperature") return clamp(0.75 + Math.abs((current.temperature_2m ?? 0) - 10) / 45, 0.75, 1.22);
+      if (layer === "rain") return clamp(0.72 + (current.precipitation ?? 0) / 6, 0.72, 1.3);
+      if (layer === "wind") return clamp(0.72 + (current.wind_speed_10m ?? 0) / 60, 0.72, 1.35);
+      if (layer === "snow") return clamp(0.72 + (current.snowfall ?? 0) / 3, 0.72, 1.25);
+      if (layer === "cloud") return clamp(0.7 + (current.cloud_cover ?? 0) / 170, 0.7, 1.3);
+      return 0.95;
+    }
+
+    function buildMapStyle() {
+      if (!terrainAvailable) {
+        showBox("mapWarning", "MapTiler kulcs nincs megadva, ezért az MVP demo alaptérképpel fut, 3D terrain nélkül.");
+        return "https://demotiles.maplibre.org/style.json";
+      }
+
+      return {
+        version: 8,
+        glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+        sources: {
+          base: {
+            type: "raster",
+            tiles: [`https://api.maptiler.com/maps/outdoor-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`],
+            tileSize: 256,
+            attribution: "© MapTiler © OpenStreetMap contributors",
+          },
+          terrain: {
+            type: "raster-dem",
+            tiles: [`https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.webp?key=${MAPTILER_KEY}`],
+            tileSize: 256,
+            encoding: "mapbox",
+            attribution: "© MapTiler",
+          },
+        },
+        layers: [
+          {
+            id: "base",
+            type: "raster",
+            source: "base",
+            paint: {
+              "raster-saturation": -0.45,
+              "raster-brightness-min": 0.05,
+              "raster-brightness-max": 0.72,
+              "raster-contrast": 0.18,
+            },
+          },
+          {
+            id: "hillshade",
+            type: "hillshade",
+            source: "terrain",
+            paint: {
+              "hillshade-shadow-color": "#020617",
+              "hillshade-highlight-color": "#7dd3fc",
+              "hillshade-accent-color": "#38bdf8",
+            },
+          },
+        ],
+      };
+    }
+
+    function initMap() {
+      map = new maplibregl.Map({
+        container: "map",
+        center: DEFAULT_CENTER,
+        zoom: DEFAULT_ZOOM,
+        pitch: terrainAvailable ? 58 : 0,
+        bearing: terrainAvailable ? -20 : 0,
+        antialias: true,
+        style: buildMapStyle(),
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+      map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
+
+      map.on("load", () => {
+        if (terrainAvailable && map.getSource("terrain")) {
+          map.setTerrain({ source: "terrain", exaggeration: terrainExaggeration });
+          map.setSky({
+            "sky-color": "#020617",
+            "sky-horizon-blend": 0.3,
+            "horizon-color": "#082f49",
+            "horizon-fog-blend": 0.55,
+            "fog-color": "#0f172a",
+            "fog-ground-blend": 0.65,
+          });
+        }
+        updateMarker();
+        fetchWeather();
+        refreshWeatherSamples();
+      });
+
+      map.on("error", (event) => {
+        const message = event && event.error && event.error.message ? event.error.message : "Térképcsempe betöltési hiba.";
+        if (message.includes("403") || message.includes("401")) {
+          showBox("mapWarning", "A térképszolgáltató elutasította a tile kérést. Ellenőrizd a MapTiler kulcsot vagy annak domain-korlátozását.");
+        }
+      });
+
+      map.on("click", (event) => {
+        selectedPoint = { lng: event.lngLat.lng, lat: event.lngLat.lat };
+        updateMarker();
+        fetchWeather();
+      });
+
+      map.on("moveend", scheduleWeatherSamples);
+      map.on("zoomend", scheduleWeatherSamples);
+    }
+
+    function updateMarker() {
+      if (!map) return;
+      if (marker) marker.remove();
+
+      const el = document.createElement("div");
+      el.className = "marker-dot";
+      marker = new maplibregl.Marker({ element: el })
+        .setLngLat([selectedPoint.lng, selectedPoint.lat])
+        .addTo(map);
+
+      setText("coords", `Kijelölt pont: ${selectedPoint.lat.toFixed(5)}, ${selectedPoint.lng.toFixed(5)}`);
+    }
+
+    async function fetchWeather() {
+      showBox("errorBox", "");
+      document.getElementById("statusIcon").textContent = "⏳";
+
+      try {
+        const response = await fetch(makeOpenMeteoUrl(selectedPoint.lat, selectedPoint.lng));
+        if (!response.ok) throw new Error(`Open-Meteo hiba: ${response.status}`);
+        const data = await response.json();
+        renderWeather(data.current);
+      } catch (error) {
+        showBox("errorBox", error.message || "Nem sikerült lekérni az időjárást.");
+        document.getElementById("statusIcon").textContent = "⚠️";
+      }
+    }
+
+    function renderWeather(current) {
+      const [label, icon] = weatherLabel(current && current.weather_code);
+      const risk = getRisk(current);
+
+      document.getElementById("statusIcon").textContent = icon;
+      setText("temp", `${round(current && current.temperature_2m)} °C`);
+      setText("feels", `${round(current && current.apparent_temperature)} °C`);
+      setText("cloud", `${round(current && current.cloud_cover, 0)} %`);
+      setText("precip", `${round(current && current.precipitation)} mm`);
+      setText("snow", `${round(current && current.snowfall)} cm`);
+      setText("wind", `${round(current && current.wind_speed_10m)} km/h`);
+      setText("condition", `Állapot: ${label}`);
+      setText("risk", `Outdoor kockázat: ${risk.label}`);
+    }
+
+    function scheduleWeatherSamples() {
+      if (sampleTimer) clearTimeout(sampleTimer);
+      sampleTimer = setTimeout(refreshWeatherSamples, 650);
+    }
+
+    function getSamplePoints() {
+      if (!map) return [];
+
+      const canvas = map.getCanvas();
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      const zoom = map.getZoom();
+
+      const panelWidth = window.innerWidth <= 640 ? 0 : 460;
+      const leftInset = Math.min(panelWidth, width * 0.35);
+      const topInset = 90;
+      const bottomInset = 80;
+      const rightInset = 80;
+
+      const minX = leftInset;
+      const maxX = Math.max(leftInset + 120, width - rightInset);
+      const minY = topInset;
+      const maxY = Math.max(topInset + 120, height - bottomInset);
+
+      const cols = zoom < 6 ? 3 : zoom < 8 ? 4 : 5;
+      const rows = zoom < 6 ? 2 : zoom < 8 ? 3 : 4;
+      const points = [];
+      const seen = new Set();
+
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          const px = minX + ((x + 0.5) / cols) * (maxX - minX);
+          const py = minY + ((y + 0.5) / rows) * (maxY - minY);
+          const lngLat = map.unproject([px, py]);
+          const lat = lngLat.lat;
+          const lng = lngLat.lng;
+          const key = `${lat.toFixed(1)},${lng.toFixed(1)}`;
+
+          if (!seen.has(key) && Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 85) {
+            seen.add(key);
+            points.push({ lat, lng });
+          }
+        }
+      }
+
+      return points.slice(0, MAX_WEATHER_POINTS);
+    }
+
+    function cacheKey(point) {
+      return `${point.lat.toFixed(2)},${point.lng.toFixed(2)}`;
+    }
+
+    async function fetchSamplePoint(point, signal) {
+      const key = cacheKey(point);
+      const cached = weatherCache.get(key);
+      if (cached && Date.now() - cached.time < WEATHER_POINT_TTL_MS) {
+        return { ...cached.value, lat: point.lat, lng: point.lng };
+      }
+
+      const response = await fetch(makeOpenMeteoUrl(point.lat, point.lng), { signal });
+      if (!response.ok) throw new Error(`Open-Meteo sample error: ${response.status}`);
+      const data = await response.json();
+      const value = { lat: point.lat, lng: point.lng, current: data.current };
+      weatherCache.set(key, { time: Date.now(), value });
+      return value;
+    }
+
+    async function refreshWeatherSamples() {
+      if (!map || !map.isStyleLoaded() || !sampleEnabled) {
+        clearWeatherMarkers();
+        setText("sampleCount", "0 pont");
+        return;
+      }
+
+      if (sampleAbortController) sampleAbortController.abort();
+      sampleAbortController = new AbortController();
+
+      const points = getSamplePoints();
+      setText("sampleCount", `${points.length} pont frissül`);
+
+      try {
+        const results = [];
+        for (const point of points) {
+          try {
+            const result = await fetchSamplePoint(point, sampleAbortController.signal);
+            results.push(result);
+          } catch (error) {
+            if (error.name === "AbortError") return;
+          }
+        }
+        renderWeatherMarkers(results);
+        setText("sampleCount", `${results.length} pont`);
+      } catch (error) {
+        if (error.name !== "AbortError") showBox("errorBox", "A térképes időjárási mintapontok lekérése nem sikerült.");
+      }
+    }
+
+    function clearWeatherMarkers() {
+      for (const item of weatherMarkers) item.remove();
+      weatherMarkers = [];
+    }
+
+    function renderWeatherMarkers(items) {
+      clearWeatherMarkers();
+      if (!sampleEnabled) return;
+
+      weatherMarkers = items.map((item) => {
+        const el = document.createElement("div");
+        el.className = "wx-marker";
+        const [color, fill, glow] = colorForLayer(activeWeatherLayer, item.current);
+        const data = valueForLayer(activeWeatherLayer, item.current);
+        const scale = sizeForLayer(activeWeatherLayer, item.current);
+        el.style.setProperty("--wx-color", color);
+        el.style.setProperty("--wx-fill", fill);
+        el.style.setProperty("--wx-glow", glow);
+        
+
+        const windArrow = activeWeatherLayer === "wind"
+          ? `<div class="wx-wind-arrow" style="transform: translate(-50%, -78%) rotate(${data.direction}deg)"></div>`
+          : "";
+
+        el.innerHTML = `
+          <div class="wx-inner" style="transform: scale(${scale})">
+            <div class="wx-ring"></div>
+            ${windArrow}
+            <div class="wx-icon">${data.icon}</div>
+            <div class="wx-value">${data.value}</div>
+          </div>
+        `;
+
+        return new maplibregl.Marker({ element: el, anchor: "center" })
+          .setLngLat([item.lng, item.lat])
+          .addTo(map);
+      });
+    }
+
+    async function fetchRadarMetadata() {
+      try {
+        const response = await fetch(RAINVIEWER_API);
+        if (!response.ok) throw new Error("RainViewer metadata error");
+        const data = await response.json();
+        const frames = data && data.radar && data.radar.past ? data.radar.past : [];
+        radarFrame = frames[frames.length - 1] || null;
+      } catch {
+        radarFrame = null;
+      }
+    }
+
+    function updateRadarLayer() {
+      if (!map || !map.isStyleLoaded() || !radarFrame) return;
+
+      const sourceId = "rainviewer-radar";
+      const layerId = "rainviewer-radar-layer";
+      const tileUrl = `${radarFrame.path}/256/{z}/{x}/{y}/2/1_1.png`;
+      const fullTileUrl = `https://tilecache.rainviewer.com${tileUrl}`;
+
+      if (radarEnabled) {
+        if (!map.getSource(sourceId)) {
+          map.addSource(sourceId, {
+            type: "raster",
+            tiles: [fullTileUrl],
+            tileSize: 256,
+            attribution: "RainViewer",
+            minzoom: 0,
+            maxzoom: 10,
+          });
+        }
+        if (!map.getLayer(layerId)) {
+          const beforeId = map.getLayer("hillshade") ? "hillshade" : undefined;
+          map.addLayer({
+            id: layerId,
+            type: "raster",
+            source: sourceId,
+            minzoom: 0,
+            maxzoom: 22,
+            paint: {
+              "raster-opacity": 0.78,
+              "raster-resampling": "linear",
+            },
+          }, beforeId);
+        }
+      } else {
+        if (map.getLayer(layerId)) map.removeLayer(layerId);
+        if (map.getSource(sourceId)) map.removeSource(sourceId);
+      }
+    }
+
+    function bindControls() {
+      document.getElementById("flyBtn").addEventListener("click", () => {
+        if (!map) return;
+        map.flyTo({
+          center: [selectedPoint.lng, selectedPoint.lat],
+          zoom: Math.max(map.getZoom(), 10),
+          pitch: terrainAvailable ? 65 : 0,
+          bearing: terrainAvailable ? -25 : 0,
+        });
+      });
+
+      document.getElementById("radarBtn").addEventListener("click", () => {
+        radarEnabled = !radarEnabled;
+        const btn = document.getElementById("radarBtn");
+        btn.textContent = radarEnabled ? "Bekapcsolva" : "Kikapcsolva";
+        btn.classList.toggle("active", radarEnabled);
+        btn.classList.toggle("secondary", !radarEnabled);
+        updateRadarLayer();
+      });
+
+      document.getElementById("sampleBtn").addEventListener("click", () => {
+        sampleEnabled = !sampleEnabled;
+        const btn = document.getElementById("sampleBtn");
+        btn.textContent = sampleEnabled ? "Bekapcsolva" : "Kikapcsolva";
+        btn.classList.toggle("active", sampleEnabled);
+        btn.classList.toggle("secondary", !sampleEnabled);
+        refreshWeatherSamples();
+      });
+
+      document.querySelectorAll(".layer-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+          activeWeatherLayer = button.dataset.layer;
+          document.querySelectorAll(".layer-btn").forEach((b) => b.classList.remove("selected"));
+          button.classList.add("selected");
+          refreshWeatherSamples();
+        });
+      });
+
+      const slider = document.getElementById("terrainSlider");
+      if (!terrainAvailable) {
+        slider.disabled = true;
+        setText("terrainLabel", "kulcs kell hozzá");
+      }
+      slider.addEventListener("input", (event) => {
+        terrainExaggeration = Number(event.target.value);
+        setText("terrainLabel", `${terrainExaggeration.toFixed(1)}×`);
+        if (terrainAvailable && map && map.isStyleLoaded() && map.getSource("terrain")) {
+          map.setTerrain({ source: "terrain", exaggeration: terrainExaggeration });
+        }
+      });
+    }
+
+    function runSelfTests() {
+      console.assert(hasValidMapTilerKey("") === false, "Empty MapTiler key should be invalid");
+      console.assert(hasValidMapTilerKey("REPLACE_WITH_YOUR_MAPTILER_KEY") === false, "Placeholder key should be invalid");
+      console.assert(hasValidMapTilerKey("abc123") === true, "Real-looking key should be valid");
+      console.assert(weatherLabel(45)[0] === "Ködös", "Weather code 45 should be foggy");
+      console.assert(weatherLabel(71)[0] === "Havas", "Weather code 71 should be snowy");
+      console.assert(round(null) === "–", "Null values should render as dash");
+      console.assert(valueForLayer("temperature", { temperature_2m: 22 }).value === "22°", "Temperature layer should show rounded degrees");
+      console.assert(valueForLayer("cloud", { cloud_cover: 86 }).value === "86%", "Cloud layer should show percent");
+      console.assert(getSamplePoints instanceof Function, "Sample point generator should exist");
+      console.assert(MAX_WEATHER_POINTS <= 18, "Frontend-only sample count should stay API-friendly");
+    }
+
+    runSelfTests();
+    bindControls();
+    initMap();
+    fetchRadarMetadata().then(() => updateRadarLayer());
+  </script>
+</body>
+</html>
