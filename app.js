@@ -1,0 +1,2034 @@
+// ===========================================================================
+// Weather Terrain MVP — app.js
+// Two modes:
+//   1. Heatmap mode (default): city weather bubbles over the visible map area.
+//   2. Route mode: user clicks points on the map to build a route; points are
+//      connected with a pulsing Death-Stranding-style line. Travel speed
+//      presets estimate arrival time at each point (weather-per-point lookup
+//      comes in a later step).
+// ===========================================================================
+
+const MAPTILER_KEY = "aX0oCOi0xeZIkeidagYz";
+const DEFAULT_CENTER = [19.0402, 47.4979];
+const DEFAULT_ZOOM = 7;
+const WORLD_COUNTRIES_URL = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson";
+const OVERPASS_API_URL = "https://overpass-api.de/api/interpreter";
+const OVERPASS_MIN_ZOOM = 6.0;
+const OVERPASS_MAX_BBOX_AREA = 45;
+const WEATHER_POINT_TTL_MS = 10 * 60 * 1000;
+const MARKER_DECLUTTER_DIST = 64;
+const REFRESH_DELAY_NORMAL = 350;
+const REFRESH_DELAY_FAST = 90;
+const WEATHER_FETCH_CONCURRENCY = 5;
+const WEATHER_FETCH_RETRY_MAX = 3;
+
+const ROUTE_MAX_POINTS = 30;
+const ROUTE_CITY_SNAP_KM = 15;
+const ROUTE_SPEED_PRESETS = [
+  { key: "walk", label: "Gyalog", kmh: 5 },
+  { key: "bike", label: "Kerekpar", kmh: 18 },
+  { key: "car", label: "Auto", kmh: 90 },
+  { key: "train", label: "Vonat", kmh: 140 }
+];
+const ROUTE_SPEED_MIN = 1;
+const ROUTE_SPEED_MAX = 200;
+
+const HEATMAP_MODE_TITLE = "Várospontos időjárási térkép";
+const HEATMAP_MODE_LEAD = "A látható térképrész városaira holografikus pontok kerülnek, térben egyenletesen elosztva. Közel zoomolva online városkeresést is használ.";
+const ROUTE_MODE_TITLE = "Útvonaltervező";
+const ROUTE_MODE_LEAD = "Kattints a térképre, hogy útvonalpontokat adj hozzá. Közeli városra kattintva rááll a városra.";
+
+let terrainExaggeration = 3;
+let pointsEnabled = true;
+let mapBaseEnabled = true;
+let activeWeatherLayer = "temperature";
+let cityDisplayLimit = 18;
+let refreshDelayMs = REFRESH_DELAY_NORMAL;
+let isLoading = false;
+let map = null;
+let weatherCache = new Map();
+let cityQueryCache = new Map();
+let sampleTimer = null;
+let sampleAbortController = null;
+let latestCitySamples = [];
+let latestRenderedMarkerItems = [];
+let lastMarkerHTMLKey = "";
+let lastSampleCountText = "";
+let positionFrameQueued = false;
+
+let appMode = "heatmap";
+let routeAddingActive = false;
+let routePoints = [];
+let routeSpeedKmh = ROUTE_SPEED_PRESETS[2].kmh;
+let routeSelectedPresetKey = ROUTE_SPEED_PRESETS[2].key;
+let routePositionFrameQueued = false;
+let routeDashAnimFrame = null;
+let routeDashPhase = 0;
+let routeWeatherLayer = "temperature";
+let routeWeatherByPointId = new Map(); // pointId -> { current, etaDate }
+let routeWeatherAbortController = null;
+let routeWeatherRequestToken = 0;
+
+const CITY_SAMPLES = [
+  citySample("Budapest", 47.497900, 19.040200, "HU"),
+  citySample("Debrecen", 47.531600, 21.627300, "HU"),
+  citySample("Szeged", 46.253000, 20.141400, "HU"),
+  citySample("Miskolc", 48.103500, 20.778400, "HU"),
+  citySample("Pecs", 46.072700, 18.232300, "HU"),
+  citySample("Gyor", 47.687500, 17.634700, "HU"),
+  citySample("Nyiregyhaza", 47.949500, 21.724400, "HU"),
+  citySample("Kecskemet", 46.896400, 19.691300, "HU"),
+  citySample("Szekesfehervar", 47.186000, 18.422100, "HU"),
+  citySample("Szombathely", 47.230700, 16.621800, "HU"),
+  citySample("Eger", 47.902500, 20.373300, "HU"),
+  citySample("Bekescsaba", 46.673600, 21.096600, "HU"),
+  citySample("Nagykanizsa", 46.459000, 16.990000, "HU"),
+  citySample("Bratislava", 48.148600, 17.107700, "SK"),
+  citySample("Kosice", 48.716400, 21.261100, "SK"),
+  citySample("Nitra", 48.306100, 18.086500, "SK"),
+  citySample("Vienna", 48.208200, 16.373800, "AT"),
+  citySample("Graz", 47.070700, 15.439500, "AT"),
+  citySample("Zagreb", 45.815000, 15.981900, "HR"),
+  citySample("Osijek", 45.554900, 18.695500, "HR"),
+  citySample("Ljubljana", 46.056900, 14.505800, "SI"),
+  citySample("Belgrade", 44.786600, 20.448900, "RS"),
+  citySample("Novi Sad", 45.267100, 19.833500, "RS"),
+  citySample("Timisoara", 45.748900, 21.208700, "RO"),
+  citySample("Arad", 46.186600, 21.312300, "RO"),
+  citySample("Oradea", 47.046500, 21.918900, "RO"),
+  citySample("Cluj-Napoca", 46.771200, 23.589900, "RO"),
+  citySample("Sibiu", 45.798300, 24.121300, "RO"),
+  citySample("Brasov", 45.657900, 25.601200, "RO"),
+  citySample("Targu Mures", 46.538600, 24.562500, "RO"),
+  citySample("Bucharest", 44.426800, 26.102500, "RO"),
+  citySample("Prague", 50.075500, 14.437800, "CZ"),
+  citySample("Brno", 49.195100, 16.606800, "CZ"),
+  citySample("Krakow", 50.064700, 19.945000, "PL"),
+  citySample("Warsaw", 52.229700, 21.012200, "PL"),
+  citySample("Lviv", 49.842900, 24.031100, "UA"),
+  citySample("Munich", 48.135100, 11.582000, "DE"),
+  citySample("Sarajevo", 43.856300, 18.413100, "BA"),
+  citySample("Podgorica", 42.430400, 19.262900, "ME"),
+  citySample("Trieste", 45.649500, 13.776800, "IT"),
+  citySample("Hajduszoboszlo", 47.443000, 21.391000, "HU"),
+  citySample("Balmazujvaros", 47.616700, 21.350000, "HU"),
+  citySample("Hajduboszormeny", 47.666700, 21.516700, "HU"),
+  citySample("Hajdunanas", 47.850000, 21.433300, "HU"),
+  citySample("Tiszaujvaros", 47.933300, 21.083300, "HU"),
+  citySample("Mezokovesd", 47.816700, 20.583300, "HU"),
+  citySample("Kazincbarcika", 48.250000, 20.633300, "HU"),
+  citySample("Szerencs", 48.166700, 21.200000, "HU"),
+  citySample("Tokaj", 48.116700, 21.416700, "HU"),
+  citySample("Sarospatak", 48.316700, 21.566700, "HU"),
+  citySample("Mateszalka", 47.950000, 22.316700, "HU"),
+  citySample("Kisvarda", 48.216700, 22.083300, "HU"),
+  citySample("Berettyoujfalu", 47.216700, 21.550000, "HU"),
+  citySample("Karcag", 47.316700, 20.933300, "HU"),
+  citySample("Tiszafured", 47.616700, 20.766700, "HU"),
+  citySample("Jaszbereny", 47.500000, 19.916700, "HU"),
+  citySample("Hatvan", 47.666700, 19.683300, "HU"),
+  citySample("Gyongyos", 47.783300, 19.933300, "HU"),
+  citySample("Salgotarjan", 48.100000, 19.800000, "HU"),
+  citySample("Ozd", 48.216700, 20.300000, "HU"),
+  citySample("Vac", 47.783300, 19.133300, "HU"),
+  citySample("Esztergom", 47.783300, 18.733300, "HU"),
+  citySample("Tatabanya", 47.583300, 18.416700, "HU"),
+  citySample("Veszprem", 47.100000, 17.916700, "HU"),
+  citySample("Siofok", 46.900000, 18.050000, "HU"),
+  citySample("Kaposvar", 46.366700, 17.800000, "HU"),
+  citySample("Dunaujvaros", 46.966700, 18.933300, "HU"),
+  citySample("Baja", 46.183300, 18.950000, "HU"),
+  citySample("Kalocsa", 46.533300, 18.983300, "HU"),
+  citySample("Szekszard", 46.350000, 18.700000, "HU"),
+  citySample("Hodmezovasarhely", 46.416700, 20.316700, "HU"),
+  citySample("Mako", 46.216700, 20.483300, "HU"),
+  citySample("Oroshaza", 46.566700, 20.666700, "HU"),
+  citySample("Gyula", 46.650000, 21.283300, "HU"),
+  citySample("Sopron", 47.683300, 16.583300, "HU"),
+  citySample("Mosonmagyarovar", 47.866700, 17.266700, "HU"),
+  citySample("Papa", 47.333300, 17.466700, "HU"),
+  citySample("Zalaegerszeg", 46.833300, 16.850000, "HU"),
+  citySample("Keszthely", 46.766700, 17.250000, "HU"),
+  citySample("Szentgotthard", 46.950000, 16.283300, "HU"),
+  citySample("Carei", 47.683300, 22.466700, "RO"),
+  citySample("Satu Mare", 47.792100, 22.885300, "RO"),
+  citySample("Baia Mare", 47.659700, 23.568100, "RO"),
+  citySample("Zalau", 47.183300, 23.050000, "RO"),
+  citySample("Sacueni", 47.350000, 22.100000, "RO"),
+  citySample("Valea lui Mihai", 47.516700, 22.133300, "RO"),
+  citySample("Mukachevo", 48.450000, 22.716700, "UA"),
+  citySample("Uzhhorod", 48.616700, 22.300000, "UA"),
+  citySample("Michalovce", 48.750000, 21.916700, "SK"),
+  citySample("Trebisov", 48.633300, 21.716700, "SK"),
+  citySample("Roznava", 48.666700, 20.533300, "SK"),
+  citySample("Eisenstadt", 47.833299, 16.533297, "AT"),
+  citySample("Klagenfurt", 46.620344, 14.310020, "AT"),
+  citySample("Wiener Neustadt", 47.815982, 16.249954, "AT"),
+  citySample("Linz", 48.319233, 14.288781, "AT"),
+  citySample("Passau", 48.567047, 13.466609, "AT"),
+  citySample("Salzburg", 47.810478, 13.040020, "AT"),
+  citySample("Innsbruck", 47.280407, 11.409991, "AT"),
+  citySample("Bregenz", 47.516697, 9.766702, "AT"),
+  citySample("Antwerpen", 51.220374, 4.415017, "BE"),
+  citySample("Arlon", 49.683303, 5.816700, "BE"),
+  citySample("Brugge", 51.220374, 3.230025, "BE"),
+  citySample("Brussels", 50.833317, 4.333317, "BE"),
+  citySample("Charleroi", 50.420397, 4.450002, "BE"),
+  citySample("Gent", 51.029998, 3.700022, "BE"),
+  citySample("Mons", 50.445999, 3.939004, "BE"),
+  citySample("Liege", 50.629996, 5.580011, "BE"),
+  citySample("Hasselt", 50.964003, 5.483998, "BE"),
+  citySample("Namur", 50.470393, 4.870028, "BE"),
+  citySample("Burgas", 42.514600, 27.474643, "BG"),
+  citySample("Dobrich", 43.585051, 27.839995, "BG"),
+  citySample("Sofia", 42.683349, 23.316654, "BG"),
+  citySample("Khaskovo", 41.943782, 25.563287, "BG"),
+  citySample("Kyustendil", 42.284278, 22.691111, "BG"),
+  citySample("Lovec", 43.137999, 24.719005, "BG"),
+  citySample("Montana", 43.414002, 23.237002, "BG"),
+  citySample("Pernik", 42.609995, 23.022718, "BG"),
+  citySample("Pleven", 43.423769, 24.613371, "BG"),
+  citySample("Plovdiv", 42.153976, 24.753982, "BG"),
+  citySample("Razgrad", 43.533999, 26.535997, "BG"),
+  citySample("Ruse", 43.853691, 25.973339, "BG"),
+  citySample("Shumen", 43.270006, 26.929353, "BG"),
+  citySample("Sliven", 42.679370, 26.330010, "BG"),
+  citySample("Stara Zagora", 42.423133, 25.622715, "BG"),
+  citySample("Varna", 43.215643, 27.895289, "BG"),
+  citySample("Turnovo", 43.086245, 25.655529, "BG"),
+  citySample("Vratsa", 43.209984, 23.562530, "BG"),
+  citySample("Slavonski Brod", 45.160278, 18.015582, "HR"),
+  citySample("Dubrovnik", 42.660948, 18.091392, "HR"),
+  citySample("Pula", 44.868720, 13.848085, "HR"),
+  citySample("Karlovac", 45.487209, 15.547774, "HR"),
+  citySample("Rijeka", 45.329984, 14.450012, "HR"),
+  citySample("Split", 43.520404, 16.469992, "HR"),
+  citySample("Zadar", 44.120135, 15.262262, "HR"),
+  citySample("Sibenik", 43.727222, 15.905833, "HR"),
+  citySample("Nicosia", 35.166676, 33.366635, "CY"),
+  citySample("Larnaka", 34.917003, 33.635998, "CY"),
+  citySample("Lemosos", 34.675414, 33.033322, "CY"),
+  citySample("Paphos", 34.755915, 32.422457, "CY"),
+  citySample("Ceske Budejovice", 48.980019, 14.460037, "CZ"),
+  citySample("Pizen", 49.740438, 13.360001, "CZ"),
+  citySample("Jihlava", 49.400381, 15.583328, "CZ"),
+  citySample("Zlin", 49.230418, 17.650023, "CZ"),
+  citySample("Hradec Kralove", 50.205996, 15.812002, "CZ"),
+  citySample("Pardubice", 50.040420, 15.760009, "CZ"),
+  citySample("Liberec", 50.799960, 15.079999, "CZ"),
+  citySample("Usti Nad Labem", 50.662998, 14.081005, "CZ"),
+  citySample("Olomouc", 49.630031, 17.249996, "CZ"),
+  citySample("Ostrava", 49.830355, 18.249987, "CZ"),
+  citySample("Hillerod", 55.933299, 12.316699, "DK"),
+  citySample("Kobenhavn", 55.678564, 12.563486, "DK"),
+  citySample("Viborg", 56.433337, 9.399984, "DK"),
+  citySample("Arhus", 56.157204, 10.210684, "DK"),
+  citySample("Aalborg", 57.033714, 9.916593, "DK"),
+  citySample("Frederikshavn", 57.433689, 10.533300, "DK"),
+  citySample("Roskilde", 55.649974, 12.083335, "DK"),
+  citySample("Soro", 55.432998, 11.566702, "DK"),
+  citySample("Esbjerg", 55.467039, 8.450016, "DK"),
+  citySample("Odense", 55.400377, 10.383335, "DK"),
+  citySample("Svendborg", 55.070423, 10.616654, "DK"),
+  citySample("Vejle", 55.709001, 9.534996, "DK"),
+  citySample("Tallinn", 59.433877, 24.728041, "EE"),
+  citySample("Kohtla-Jarve", 59.399978, 27.283337, "EE"),
+  citySample("Narva", 59.377628, 28.160286, "EE"),
+  citySample("Haapsalu", 58.943056, 23.541389, "EE"),
+  citySample("Parnu", 58.374743, 24.513584, "EE"),
+  citySample("Tartu", 58.383941, 26.709884, "EE"),
+  citySample("Viljandi", 58.363889, 25.590000, "EE"),
+  citySample("Jyvaskyla", 62.260346, 25.749994, "FI"),
+  citySample("Kuopio", 62.894286, 27.694940, "FI"),
+  citySample("Porvoo", 60.400356, 25.666020, "FI"),
+  citySample("Turku", 60.453867, 22.254962, "FI"),
+  citySample("Kemi", 65.733312, 24.581693, "FI"),
+  citySample("Kemijarvi", 66.666666, 27.416662, "FI"),
+  citySample("Rovaniemi", 66.500035, 25.715939, "FI"),
+  citySample("Sodankyla", 67.417059, 26.600019, "FI"),
+  citySample("Joensuu", 62.599989, 29.766648, "FI"),
+  citySample("Oulu", 64.999998, 25.470011, "FI"),
+  citySample("Tampere", 61.500005, 23.750013, "FI"),
+  citySample("Lahti", 60.993860, 25.664934, "FI"),
+  citySample("Pori", 61.478895, 21.774939, "FI"),
+  citySample("Lappeenranta", 61.067059, 28.183334, "FI"),
+  citySample("Helsinki", 60.175563, 24.934126, "FI"),
+  citySample("Kouvola", 60.876000, 26.709004, "FI"),
+  citySample("Mikkeli", 61.689996, 27.285003, "FI"),
+  citySample("Savonlinna", 61.866623, 28.883343, "FI"),
+  citySample("Hameenlinna", 60.996996, 24.472000, "FI"),
+  citySample("Kokkola", 63.833299, 23.116666, "FI"),
+  citySample("Vaasa", 63.099984, 21.600015, "FI"),
+  citySample("Mulhouse", 47.750404, 7.349980, "FR"),
+  citySample("Strasbourg", 48.579966, 7.750007, "FR"),
+  citySample("Agen", 44.200414, 0.633336, "FR"),
+  citySample("Biarritz", 43.473275, -1.561595, "FR"),
+  citySample("Bordeaux", 44.850013, -0.595013, "FR"),
+  citySample("Clermont-Ferrand", 45.779982, 3.080008, "FR"),
+  citySample("Vichy", 46.117145, 3.416680, "FR"),
+  citySample("Caen", 49.183754, -0.349989, "FR"),
+  citySample("Cherbourg", 49.650392, -1.649987, "FR"),
+  citySample("Auxerre", 47.800427, 3.566593, "FR"),
+  citySample("Dijon", 47.330404, 5.030018, "FR"),
+  citySample("Nevers", 46.983733, 3.166669, "FR"),
+  citySample("Brest", 48.390443, -4.495008, "FR"),
+  citySample("Lorient", 47.750404, -3.366575, "FR"),
+  citySample("Rennes", 48.100021, -1.670012, "FR"),
+  citySample("St.-Brieuc", 48.516663, -2.783303, "FR"),
+  citySample("Bourges", 47.083727, 2.399998, "FR"),
+  citySample("Orleans", 47.900421, 1.900028, "FR"),
+  citySample("Tours", 47.380375, 0.699947, "FR"),
+  citySample("Reims", 49.250390, 4.029976, "FR"),
+  citySample("Troyes", 48.340394, 4.083358, "FR"),
+  citySample("Ajaccio", 41.927065, 8.728294, "FR"),
+  citySample("Bastia", 42.703167, 9.450007, "FR"),
+  citySample("Besancon", 47.229997, 6.030009, "FR"),
+  citySample("Dieppe", 49.933734, 1.083334, "FR"),
+  citySample("Le Havre", 49.504974, 0.104970, "FR"),
+  citySample("Rouen", 49.430405, 1.079975, "FR"),
+  citySample("Beziers", 43.350492, 3.209974, "FR"),
+  citySample("Montpellier", 43.610399, 3.869986, "FR"),
+  citySample("Nimes", 43.830385, 4.350008, "FR"),
+  citySample("Perpignan", 42.699989, 2.899967, "FR"),
+  citySample("Brive", 45.150408, 1.533332, "FR"),
+  citySample("Limoges", 45.829979, 1.249991, "FR"),
+  citySample("Metz", 49.120347, 6.180026, "FR"),
+  citySample("Nancy", 48.683681, 6.200024, "FR"),
+  citySample("Tarbes", 43.233290, 0.083343, "FR"),
+  citySample("Toulouse", 43.619959, 1.449927, "FR"),
+  citySample("Arras", 50.283325, 2.783334, "FR"),
+  citySample("Calais", 50.950416, 1.833314, "FR"),
+  citySample("Lille", 50.649969, 3.080008, "FR"),
+  citySample("Angers", 47.480008, -0.530030, "FR"),
+  citySample("Le Mans", 48.000415, 0.099983, "FR"),
+  citySample("Nantes", 47.210386, -1.590017, "FR"),
+  citySample("Amiens", 49.900377, 2.300004, "FR"),
+  citySample("La Rochelle", 46.166651, -1.149992, "FR"),
+  citySample("Poitier", 46.583292, 0.333277, "FR"),
+  citySample("Aix-en-Provence", 43.519991, 5.449993, "FR"),
+  citySample("Marseille", 43.289979, 5.375010, "FR"),
+  citySample("Nice", 43.715018, 7.265024, "FR"),
+  citySample("Toulon", 43.134186, 5.918822, "FR"),
+  citySample("Annecy", 45.899975, 6.116670, "FR"),
+  citySample("Grenoble", 45.180380, 5.720002, "FR"),
+  citySample("Lyon", 45.770009, 4.830030, "FR"),
+  citySample("Roanne", 46.033326, 4.066666, "FR"),
+  citySample("Saint-Etienne", 45.430391, 4.380032, "FR"),
+  citySample("Melun", 48.533302, 2.666648, "FR"),
+  citySample("Paris", 48.866693, 2.333335, "FR"),
+  citySample("Versailles", 48.800470, 2.133348, "FR"),
+  citySample("Freiburg", 48.000415, 7.869948, "DE"),
+  citySample("Heidelberg", 49.419992, 8.699975, "DE"),
+  citySample("Karlsruhe", 48.999992, 8.399993, "DE"),
+  citySample("Mannheim", 49.500375, 8.470015, "DE"),
+  citySample("Stuttgart", 48.779980, 9.199996, "DE"),
+  citySample("Ulm", 48.400391, 9.999999, "DE"),
+  citySample("Augsburg", 48.350006, 10.899996, "DE"),
+  citySample("Coburg", 50.266607, 10.966607, "DE"),
+  citySample("Furth", 49.470015, 10.999990, "DE"),
+  citySample("Hof", 50.317044, 11.916678, "DE"),
+  citySample("Ingolstadt", 48.770420, 11.449988, "DE"),
+  citySample("Nurnberg", 49.449991, 11.079985, "DE"),
+  citySample("Regensburg", 49.020404, 12.120025, "DE"),
+  citySample("Rosenheim", 47.850347, 12.133306, "DE"),
+  citySample("Wurzburg", 49.800434, 9.950028, "DE"),
+  citySample("Berlin", 52.521819, 13.401549, "DE"),
+  citySample("Cottbus", 51.770418, 14.329967, "DE"),
+  citySample("Potsdam", 52.400405, 13.069993, "DE"),
+  citySample("Bremen", 53.080002, 8.800021, "DE"),
+  citySample("Bremerhaven", 53.550438, 8.579982, "DE"),
+  citySample("Hamburg", 53.550025, 9.999999, "DE"),
+  citySample("Frankfurt", 50.099977, 8.675015, "DE"),
+  citySample("Giessen", 50.583720, 8.650004, "DE"),
+  citySample("Kassel", 51.300007, 9.500030, "DE"),
+  citySample("Wiesbaden", 50.080391, 8.250028, "DE"),
+  citySample("Rostock", 54.070380, 12.149997, "DE"),
+  citySample("Schwerin", 53.633304, 11.416699, "DE"),
+  citySample("Stralsund", 54.300418, 13.100017, "DE"),
+  citySample("Braunschweig", 52.249975, 10.500020, "DE"),
+  citySample("Emden", 53.366677, 7.216655, "DE"),
+  citySample("Gottingen", 51.520433, 9.920004, "DE"),
+  citySample("Hannover", 52.366970, 9.716657, "DE"),
+  citySample("Oldenburg", 53.129999, 8.220004, "DE"),
+  citySample("Osnabruck", 52.280438, 8.049989, "DE"),
+  citySample("Bielefeld", 52.029988, 8.530011, "DE"),
+  citySample("Bonn", 50.720456, 7.080022, "DE"),
+  citySample("Cologne", 50.930004, 6.950004, "DE"),
+  citySample("Dortmund", 51.529967, 7.450026, "DE"),
+  citySample("Duisburg", 51.429973, 6.750017, "DE"),
+  citySample("Dusseldorf", 51.220374, 6.779989, "DE"),
+  citySample("Essen", 51.449998, 7.016615, "DE"),
+  citySample("Munster", 51.970405, 7.620041, "DE"),
+  citySample("Wuppertal", 51.250010, 7.169991, "DE"),
+  citySample("Koblenz", 50.350478, 7.599991, "DE"),
+  citySample("Mainz", 49.982472, 8.273219, "DE"),
+  citySample("Saarbrucken", 49.250390, 6.970003, "DE"),
+  citySample("Chemnitz", 50.829984, 12.919976, "DE"),
+  citySample("Dresden", 51.049971, 13.750003, "DE"),
+  citySample("Leipzig", 51.335405, 12.409981, "DE"),
+  citySample("Magdeburg", 52.130421, 11.620004, "DE"),
+  citySample("Flensburg", 54.783748, 9.433315, "DE"),
+  citySample("Kiel", 54.330390, 10.130017, "DE"),
+  citySample("Lubeck", 53.870393, 10.669984, "DE"),
+  citySample("Erfurt", 50.970053, 11.029962, "DE"),
+  citySample("Gera", 50.870369, 12.070002, "DE"),
+  citySample("Jena", 50.930443, 11.580006, "DE"),
+  citySample("Alexandroupoli", 40.848619, 25.874410, "GR"),
+  citySample("Kavala", 40.941211, 24.401760, "GR"),
+  citySample("Komatini", 41.133303, 25.416703, "GR"),
+  citySample("Xanthi", 41.141790, 24.883587, "GR"),
+  citySample("Athens", 37.983326, 23.733321, "GR"),
+  citySample("Piraievs", 37.950021, 23.699990, "GR"),
+  citySample("Agrinio", 38.621763, 21.407727, "GR"),
+  citySample("Patra", 38.230004, 21.729981, "GR"),
+  citySample("Pirgos", 37.683732, 21.449998, "GR"),
+  citySample("Kerkira", 39.615423, 19.914743, "GR"),
+  citySample("Ioanina", 39.667900, 20.850861, "GR"),
+  citySample("Katerini", 40.272334, 22.502492, "GR"),
+  citySample("Polygyros", 40.381002, 23.453001, "GR"),
+  citySample("Seres", 41.085979, 23.549715, "GR"),
+  citySample("Thessaloniki", 40.696106, 22.885001, "GR"),
+  citySample("Hania", 35.512211, 24.015578, "GR"),
+  citySample("Iraklio", 35.325013, 25.130497, "GR"),
+  citySample("Sitia", 35.200421, 26.098551, "GR"),
+  citySample("Ermoupoli", 37.450413, 24.933300, "GR"),
+  citySample("Kos", 36.893729, 27.288815, "GR"),
+  citySample("Rodos", 36.441224, 28.222504, "GR"),
+  citySample("Kalamata", 37.038914, 22.114195, "GR"),
+  citySample("Sparti", 37.073718, 22.429680, "GR"),
+  citySample("Tripoli", 37.509143, 22.379399, "GR"),
+  citySample("Chalkida", 38.463995, 23.612398, "GR"),
+  citySample("Lamia", 38.898999, 22.434004, "GR"),
+  citySample("Larissa", 39.630409, 22.420016, "GR"),
+  citySample("Volos", 39.369960, 22.950010, "GR"),
+  citySample("Hios", 38.368109, 26.135810, "GR"),
+  citySample("Mitilini", 39.110415, 26.554648, "GR"),
+  citySample("Szolnok", 47.186356, 20.179378, "HU"),
+  citySample("Shannon", 52.703849, -8.864147, "IE"),
+  citySample("Cork", 51.898601, -8.495771, "IE"),
+  citySample("Donegal", 54.650009, -8.116673, "IE"),
+  citySample("Dublin", 53.333061, -6.248906, "IE"),
+  citySample("Galway", 53.272393, -9.048812, "IE"),
+  citySample("Killarney", 52.050400, -9.516665, "IE"),
+  citySample("Tralee", 52.266692, -9.716653, "IE"),
+  citySample("Kilkenny", 52.654550, -7.252255, "IE"),
+  citySample("Waterford", 52.258295, -7.111928, "IE"),
+  citySample("Limerick", 52.664704, -8.623050, "IE"),
+  citySample("Drogheda", 53.719265, -6.347763, "IE"),
+  citySample("Dundalk", 54.000411, -6.416673, "IE"),
+  citySample("Muineachan", 54.250000, -6.966667, "IE"),
+  citySample("Ros Comain", 53.633333, -8.183333, "IE"),
+  citySample("Sligo", 54.267061, -8.483317, "IE"),
+  citySample("L'Aquila", 42.350398, 13.390025, "IT"),
+  citySample("Pescara", 42.455431, 14.218656, "IT"),
+  citySample("Bari", 41.114220, 16.872758, "IT"),
+  citySample("Barletta", 41.319996, 16.270004, "IT"),
+  citySample("Brindisi", 40.640348, 17.930006, "IT"),
+  citySample("Foggia", 41.460478, 15.559970, "IT"),
+  citySample("Lecce", 40.360390, 18.149993, "IT"),
+  citySample("Taranto", 40.508392, 17.229997, "IT"),
+  citySample("Potenza", 40.642002, 15.798996, "IT"),
+  citySample("Catanzaro", 38.900376, 16.600010, "IT"),
+  citySample("Crotone", 39.083337, 17.123337, "IT"),
+  citySample("Reggio di Calabria", 38.114998, 15.641360, "IT"),
+  citySample("Vibo Valentia", 38.666592, 16.100040, "IT"),
+  citySample("Benevento", 41.133702, 14.749993, "IT"),
+  citySample("Caserta", 41.059960, 14.337357, "IT"),
+  citySample("Naples", 40.840025, 14.245011, "IT"),
+  citySample("Salerno", 40.680397, 14.769941, "IT"),
+  citySample("Bologna", 44.500422, 11.340021, "IT"),
+  citySample("Ferrara", 44.850426, 11.609927, "IT"),
+  citySample("Modena", 44.650025, 10.919995, "IT"),
+  citySample("Parma", 44.810429, 10.320031, "IT"),
+  citySample("Ravenna", 44.420375, 12.220019, "IT"),
+  citySample("Udine", 46.070016, 13.240008, "IT"),
+  citySample("Civitavecchia", 42.100413, 11.799993, "IT"),
+  citySample("Rome", 41.895956, 12.483258, "IT"),
+  citySample("Genoa", 44.409988, 8.930039, "IT"),
+  citySample("Bergamo", 45.700400, 9.669993, "IT"),
+  citySample("Como", 45.810006, 9.080004, "IT"),
+  citySample("Milan", 45.469975, 9.205009, "IT"),
+  citySample("Ancona", 43.600374, 13.499941, "IT"),
+  citySample("Campobasso", 41.562999, 14.655997, "IT"),
+  citySample("Asti", 44.929982, 8.209979, "IT"),
+  citySample("Novara", 45.450002, 8.619980, "IT"),
+  citySample("Turin", 45.070387, 7.669960, "IT"),
+  citySample("Cagliari", 39.222398, 9.103981, "IT"),
+  citySample("Olbia", 40.914285, 9.515072, "IT"),
+  citySample("Sassari", 40.730006, 8.570009, "IT"),
+  citySample("Catania", 37.499971, 15.079999, "IT"),
+  citySample("Marsala", 37.805404, 12.438662, "IT"),
+  citySample("Messina", 38.200471, 15.549996, "IT"),
+  citySample("Palermo", 38.125023, 13.350027, "IT"),
+  citySample("Ragusa", 36.930031, 14.729995, "IT"),
+  citySample("Siracusa", 37.070359, 15.289960, "IT"),
+  citySample("Arezzo", 43.461726, 11.874975, "IT"),
+  citySample("Florence", 43.780001, 11.250000, "IT"),
+  citySample("Livorno", 43.551134, 10.302275, "IT"),
+  citySample("Pisa", 43.720470, 10.400026, "IT"),
+  citySample("Siena", 43.317032, 11.349994, "IT"),
+  citySample("Bolzano", 46.500429, 11.360019, "IT"),
+  citySample("Trento", 46.080429, 11.119982, "IT"),
+  citySample("Perugia", 43.110378, 12.389982, "IT"),
+  citySample("Aosta", 45.737001, 7.315003, "IT"),
+  citySample("Treviso", 45.670015, 12.240017, "IT"),
+  citySample("Venice", 45.438659, 12.334999, "IT"),
+  citySample("Verona", 45.440390, 10.990016, "IT"),
+  citySample("Daugavpils", 55.879960, 26.509999, "LV"),
+  citySample("Jelgava", 56.652703, 23.712806, "LV"),
+  citySample("Rezekne", 56.500025, 27.316565, "LV"),
+  citySample("Liepaga", 56.509973, 21.010025, "LV"),
+  citySample("Riga", 56.950024, 24.099965, "LV"),
+  citySample("Ventspils", 57.389868, 21.560585, "LV"),
+  citySample("Kaunas", 54.950404, 23.880030, "LT"),
+  citySample("Klaipeda", 55.720409, 21.119941, "LT"),
+  citySample("Panevezys", 55.740020, 24.370026, "LT"),
+  citySample("Vilnius", 54.683366, 25.316635, "LT"),
+  citySample("Siauliai", 55.938639, 23.325026, "LT"),
+  citySample("Diekirch", 49.883301, 6.166702, "LU"),
+  citySample("Grevenmacher", 49.699998, 6.333301, "LU"),
+  citySample("Luxembourg", 49.611660, 6.130003, "LU"),
+  citySample("Valletta", 35.899732, 14.514711, "MT"),
+  citySample("Assen", 53.000001, 6.550003, "NL"),
+  citySample("Leeuwarden", 53.250379, 5.783357, "NL"),
+  citySample("Arnhem", 51.987996, 5.923000, "NL"),
+  citySample("Groningen", 53.220407, 6.580001, "NL"),
+  citySample("Maastricht", 50.852997, 5.677002, "NL"),
+  citySample("'s-Hertogenbosch", 51.683337, 5.316660, "NL"),
+  citySample("Eindhoven", 51.429973, 5.500015, "NL"),
+  citySample("Amsterdam", 52.349969, 4.916640, "NL"),
+  citySample("Haarlem", 52.380432, 4.629991, "NL"),
+  citySample("Zwolle", 52.524000, 6.096997, "NL"),
+  citySample("Utrecht", 52.100346, 5.120039, "NL"),
+  citySample("Middelburg", 51.501996, 3.610000, "NL"),
+  citySample("Rotterdam", 51.919969, 4.479974, "NL"),
+  citySample("The Hague", 52.080037, 4.269961, "NL"),
+  citySample("Poznan", 52.405753, 16.899940, "PL"),
+  citySample("Bydgoszcz", 53.120413, 18.010001, "PL"),
+  citySample("Grudziadz", 53.480391, 18.750008, "PL"),
+  citySample("Inowroclaw", 52.779942, 18.249987, "PL"),
+  citySample("Wroclaw", 51.110432, 17.030009, "PL"),
+  citySample("Lublin", 51.250398, 22.572720, "PL"),
+  citySample("Zielona Gora", 51.950407, 15.500025, "PL"),
+  citySample("Lodz", 51.774991, 19.451360, "PL"),
+  citySample("Opole", 50.684980, 17.931350, "PL"),
+  citySample("Bialystok", 53.150359, 23.169996, "PL"),
+  citySample("Gdansk", 54.359975, 18.640040, "PL"),
+  citySample("Gdynia", 54.520379, 18.530021, "PL"),
+  citySample("Bytom", 50.350039, 18.909998, "PL"),
+  citySample("Gliwice", 50.330376, 18.670013, "PL"),
+  citySample("Katowice", 50.260380, 19.020017, "PL"),
+  citySample("Rzeszow", 50.070470, 22.000042, "PL"),
+  citySample("Kielce", 50.890394, 20.660020, "PL"),
+  citySample("Elblag", 54.189960, 19.402681, "PL"),
+  citySample("Elk", 53.833702, 22.349995, "PL"),
+  citySample("Olsztyn", 53.800035, 20.480031, "PL"),
+  citySample("Koszalin", 54.200000, 16.183333, "PL"),
+  citySample("Szczecin", 53.420394, 14.530007, "PL"),
+  citySample("Aveiro", 40.641003, -8.650998, "PT"),
+  citySample("Angra do Heroismo", 38.650391, -27.216670, "PT"),
+  citySample("Horta", 38.534656, -28.644757, "PT"),
+  citySample("Ponta Delgada", 37.748302, -25.666584, "PT"),
+  citySample("Beja", 38.014002, -7.863002, "PT"),
+  citySample("Braga", 41.554995, -8.421331, "PT"),
+  citySample("Braganca", 41.807997, -6.755003, "PT"),
+  citySample("Castelo Branco", 39.810996, -7.488000, "PT"),
+  citySample("Covilha", 40.283341, -7.499992, "PT"),
+  citySample("Coimbra", 40.200374, -8.416680, "PT"),
+  citySample("Faro", 37.017080, -7.933273, "PT"),
+  citySample("Portimao", 37.133740, -8.533314, "PT"),
+  citySample("Guarda", 40.541004, -7.262001, "PT"),
+  citySample("Leiria", 39.738996, -8.804996, "PT"),
+  citySample("Lisbon", 38.722723, -9.144866, "PT"),
+  citySample("Setubal", 38.529960, -8.900010, "PT"),
+  citySample("Funchal", 32.649983, -16.880040, "PT"),
+  citySample("Portalegre", 39.290004, -7.423002, "PT"),
+  citySample("Porto", 41.150006, -8.620001, "PT"),
+  citySample("Santarem", 39.231000, -8.682003, "PT"),
+  citySample("Viana Do Castelo", 41.696235, -8.844137, "PT"),
+  citySample("Vila Real", 41.293998, -7.737002, "PT"),
+  citySample("Viseu", 40.656996, -7.910000, "PT"),
+  citySample("Evora", 38.559996, -7.905996, "PT"),
+  citySample("Alba Lulia", 46.077003, 23.580001, "RO"),
+  citySample("Pitesti", 44.856318, 24.875835, "RO"),
+  citySample("Bacau", 46.578435, 26.919638, "RO"),
+  citySample("Bistrita", 47.138004, 24.513004, "RO"),
+  citySample("Botosani", 47.748415, 26.659654, "RO"),
+  citySample("Braila", 45.291996, 27.969004, "RO"),
+  citySample("Buzau", 45.156506, 26.806519, "RO"),
+  citySample("Calarasi", 44.206280, 27.325918, "RO"),
+  citySample("Resita", 45.296962, 21.886509, "RO"),
+  citySample("Constanta", 44.202662, 28.609974, "RO"),
+  citySample("Tulcea", 45.199346, 28.796681, "RO"),
+  citySample("Sfintu-Gheorghe", 45.867996, 25.793001, "RO"),
+  citySample("Craiova", 44.326272, 23.825874, "RO"),
+  citySample("Targoviste", 44.937999, 25.459003, "RO"),
+  citySample("Galati", 45.455893, 28.045874, "RO"),
+  citySample("Giurgiu", 43.929999, 25.840000, "RO"),
+  citySample("Targu Jiu", 45.045000, 23.274001, "RO"),
+  citySample("Miercurea Cuic", 46.360998, 25.524001, "RO"),
+  citySample("Deva", 45.883323, 22.916674, "RO"),
+  citySample("Slobozia", 44.569998, 27.381997, "RO"),
+  citySample("Iasi", 47.168347, 27.574947, "RO"),
+  citySample("Drobeta-Turnu Severin", 44.645891, 22.665893, "RO"),
+  citySample("Tirgu Mures", 46.558203, 24.557819, "RO"),
+  citySample("Piatra-Neamt", 46.940004, 26.382997, "RO"),
+  citySample("Slatina", 44.434998, 24.371002, "RO"),
+  citySample("Ploiesti", 44.946906, 26.036488, "RO"),
+  citySample("Suceava", 47.637698, 26.259317, "RO"),
+  citySample("Alexandria", 43.901631, 25.286707, "RO"),
+  citySample("Vaslui", 46.633329, 27.733339, "RO"),
+  citySample("Focsani", 45.696551, 27.186547, "RO"),
+  citySample("Rimnicu Vilcea", 45.109998, 24.382999, "RO"),
+  citySample("Banska Bystrica", 48.733290, 19.149983, "SK"),
+  citySample("Zvolen", 48.583739, 19.133240, "SK"),
+  citySample("Presov", 48.999734, 21.239365, "SK"),
+  citySample("Trnava", 48.366594, 17.600000, "SK"),
+  citySample("Zilina", 49.219824, 18.749388, "SK"),
+  citySample("Maribor", 46.540478, 15.650042, "SI"),
+  citySample("Arrecife", 28.969049, -13.537833, "ES"),
+  citySample("Las Palmas", 28.099976, -15.429999, "ES"),
+  citySample("Santa Cruz de Tenerife", 28.469979, -16.250001, "ES"),
+  citySample("Algeciras", 36.126712, -5.466530, "ES"),
+  citySample("Almeria", 36.830348, -2.429991, "ES"),
+  citySample("Cadiz", 36.534991, -6.225005, "ES"),
+  citySample("Cordoba", 37.879999, -4.770004, "ES"),
+  citySample("Granada", 37.164978, -3.585011, "ES"),
+  citySample("Huelva", 37.250374, -6.929949, "ES"),
+  citySample("Jaen", 37.770393, -3.799985, "ES"),
+  citySample("Linares", 38.083320, -3.633355, "ES"),
+  citySample("Malaga", 36.720406, -4.419999, "ES"),
+  citySample("Marbella", 36.516620, -4.883330, "ES"),
+  citySample("Seville", 37.405015, -5.980007, "ES"),
+  citySample("Zaragoza", 41.650002, -0.889982, "ES"),
+  citySample("Santander", 43.380465, -3.799985, "ES"),
+  citySample("Burgos", 42.350398, -3.679967, "ES"),
+  citySample("Leon", 42.579971, -5.570007, "ES"),
+  citySample("Salamanca", 40.970405, -5.670000, "ES"),
+  citySample("Valladolid", 41.650002, -4.750031, "ES"),
+  citySample("Albacete", 39.000344, -1.870000, "ES"),
+  citySample("Guadalajara", 40.633707, -3.166587, "ES"),
+  citySample("Toledo", 39.867036, -4.016716, "ES"),
+  citySample("Barcelona", 41.383300, 2.183370, "ES"),
+  citySample("Mataro", 41.539957, 2.450021, "ES"),
+  citySample("Tarragona", 41.120370, 1.249991, "ES"),
+  citySample("Ceuta", 35.888984, -5.306999, "ES"),
+  citySample("Pamplona", 42.820008, -1.649987, "ES"),
+  citySample("Alicante", 38.351220, -0.483641, "ES"),
+  citySample("Castello", 39.970414, -0.050008, "ES"),
+  citySample("Valencia", 39.485018, -0.400012, "ES"),
+  citySample("Madrid", 40.400026, -3.683352, "ES"),
+  citySample("Badajoz", 38.880429, -6.969973, "ES"),
+  citySample("Merida", 38.912004, -6.337998, "ES"),
+  citySample("La Coruna", 43.329977, -8.419988, "ES"),
+  citySample("Ourense", 42.329960, -7.869995, "ES"),
+  citySample("Santiago de Compostela", 42.882898, -8.541091, "ES"),
+  citySample("Vigo", 42.220019, -8.729995, "ES"),
+  citySample("Palma", 39.574263, 2.654246, "ES"),
+  citySample("Logrono", 42.470365, -2.429991, "ES"),
+  citySample("Melilla", 35.300002, -2.950011, "ES"),
+  citySample("Bilbao", 43.249982, -2.929987, "ES"),
+  citySample("San Sebastian", 43.320391, -1.979993, "ES"),
+  citySample("Vitoria", 42.849980, -2.669977, "ES"),
+  citySample("Gijon", 43.530016, -5.670000, "ES"),
+  citySample("Oviedo", 43.350492, -5.829991, "ES"),
+  citySample("Cartagena", 37.600430, -0.980028, "ES"),
+  citySample("Lorca", 37.688564, -1.698512, "ES"),
+  citySample("Murcia", 37.979993, -1.129967, "ES"),
+  citySample("Karlskrona", 56.203002, 15.296005, "SE"),
+  citySample("Borlange", 60.483322, 15.416671, "SE"),
+  citySample("Falun", 60.613002, 15.647005, "SE"),
+  citySample("Visby", 57.633651, 18.300009, "SE"),
+  citySample("Bollnas", 61.352003, 16.366587, "SE"),
+  citySample("Gavle", 60.666980, 17.166642, "SE"),
+  citySample("Halmstad", 56.671772, 12.855587, "SE"),
+  citySample("Ostersund", 63.183313, 14.650000, "SE"),
+  citySample("Jonkoping", 57.771343, 14.165016, "SE"),
+  citySample("Kalmar", 56.667018, 16.366587, "SE"),
+  citySample("Vaxjo", 56.883697, 14.816708, "SE"),
+  citySample("Kiruna", 67.850004, 20.216637, "SE"),
+  citySample("Lulea", 65.596635, 22.158378, "SE"),
+  citySample("Orebro", 59.280347, 15.219991, "SE"),
+  citySample("Helsingborg", 56.050492, 12.700041, "SE"),
+  citySample("Kristianstad", 56.033671, 14.133287, "SE"),
+  citySample("Malmo", 55.583337, 13.033302, "SE"),
+  citySample("Stockholm", 59.350760, 18.097335, "SE"),
+  citySample("Nykoping", 58.763997, 17.015005, "SE"),
+  citySample("Uppsala", 59.860053, 17.639998, "SE"),
+  citySample("Karlstad", 59.367137, 13.499941, "SE"),
+  citySample("Skelleftea", 64.772079, 20.950028, "SE"),
+  citySample("Umea", 63.829991, 20.239994, "SE"),
+  citySample("Harnosand", 62.633997, 17.934004, "SE"),
+  citySample("Sundsvall", 62.400053, 17.316658, "SE"),
+  citySample("Ornskoldsvik", 63.318007, 18.716676, "SE"),
+  citySample("Vasteras", 59.630015, 16.540013, "SE"),
+  citySample("Boras", 57.730441, 12.919976, "SE"),
+  citySample("Goteborg", 57.750001, 12.000032, "SE"),
+  citySample("Mariestad", 58.705002, 13.827997, "SE"),
+  citySample("Trollhattan", 58.267101, 12.299962, "SE"),
+  citySample("Vannersborg", 58.363002, 12.330001, "SE"),
+  citySample("Linkoping", 58.410012, 15.629940, "SE"),
+  citySample("Norrkoping", 58.595427, 16.178692, "SE")
+];
+
+const layerConfig = {
+  temperature: {
+    title: "Homerseklet", unit: "°C", minLabel: "-45°", midLabel: "22°", maxLabel: "+45°",
+    gradient: "linear-gradient(90deg, #172554, #1d4ed8, #06b6d4, #22c55e, #f97316, #dc2626, #7f1d1d)"
+  },
+  rain: {
+    title: "Csapadek", unit: "mm", minLabel: "0", midLabel: "1", maxLabel: "8+",
+    gradient: "linear-gradient(90deg, rgba(56,189,248,0.15), #22d3ee, #60a5fa, #a78bfa, #f87171)"
+  },
+  wind: {
+    title: "Szelsebesseg", unit: "km/h", minLabel: "0", midLabel: "25", maxLabel: "65+",
+    gradient: "linear-gradient(90deg, #22d3ee, #facc15, #f97316, #dc2626)"
+  },
+  snow: {
+    title: "Havazas", unit: "cm", minLabel: "0", midLabel: "1", maxLabel: "6+",
+    gradient: "linear-gradient(90deg, rgba(147,197,253,0.2), #93c5fd, #e0f2fe, #ffffff)"
+  },
+  cloud: {
+    title: "Felhozet", unit: "%", minLabel: "0", midLabel: "50", maxLabel: "100",
+    gradient: "linear-gradient(90deg, #facc15, #93c5fd, #cbd5e1, #f8fafc)"
+  },
+  risk: {
+    title: "Outdoor kockazat", unit: "idx", minLabel: "0", midLabel: "3", maxLabel: "6+",
+    gradient: "linear-gradient(90deg, #22c55e, #facc15, #f97316, #dc2626)"
+  }
+};
+
+function citySample(name, lat, lng, country) { return { name, lat, lng, country }; }
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+function round(value, decimals = 1) { if (value === null || value === undefined || Number.isNaN(value)) return "–"; return Number(value).toFixed(decimals); }
+function setText(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
+function showBox(id, message) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!message) { el.classList.add("hidden"); el.textContent = ""; return; }
+  el.classList.remove("hidden"); el.textContent = message;
+}
+
+function setLoading(on) {
+  isLoading = on;
+  const badge = document.getElementById("loadingBadge");
+  if (badge) badge.classList.toggle("hidden", !on);
+}
+
+function makeOpenMeteoUrl(lat, lng) {
+  const params = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lng),
+    current: ["temperature_2m", "apparent_temperature", "precipitation", "snowfall", "weather_code", "cloud_cover", "wind_speed_10m"].join(","),
+    forecast_days: "1",
+    timezone: "auto"
+  });
+  return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+}
+
+// Hourly forecast endpoint, used for route points where we need the weather
+// at a FUTURE estimated arrival time rather than right now. forecast_days=2
+// covers arrival times that roll past midnight.
+function makeOpenMeteoHourlyUrl(lat, lng) {
+  const params = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lng),
+    hourly: ["temperature_2m", "precipitation", "snowfall", "weather_code", "cloud_cover", "wind_speed_10m"].join(","),
+    forecast_days: "2",
+    timezone: "auto"
+  });
+  return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+}
+
+// Picks the hourly forecast entry closest to the target Date from an
+// Open-Meteo hourly response, and reshapes it into the same field names used
+// by the "current" weather object so existing layer/color helpers work
+// unchanged for both heatmap and route markers.
+function pickHourlyForecastAt(hourly, targetDate) {
+  if (!hourly || !Array.isArray(hourly.time) || !hourly.time.length) return null;
+  const targetMs = targetDate.getTime();
+  let bestIndex = 0;
+  let bestDiff = Infinity;
+  for (let i = 0; i < hourly.time.length; i++) {
+    const t = new Date(hourly.time[i]).getTime();
+    const diff = Math.abs(t - targetMs);
+    if (diff < bestDiff) { bestDiff = diff; bestIndex = i; }
+  }
+  return {
+    temperature_2m: hourly.temperature_2m?.[bestIndex],
+    precipitation: hourly.precipitation?.[bestIndex],
+    snowfall: hourly.snowfall?.[bestIndex],
+    weather_code: hourly.weather_code?.[bestIndex],
+    cloud_cover: hourly.cloud_cover?.[bestIndex],
+    wind_speed_10m: hourly.wind_speed_10m?.[bestIndex],
+    forecastTime: hourly.time[bestIndex]
+  };
+}
+
+function getRiskValue(current) {
+  if (!current) return 0;
+  let score = 0;
+  if ((current.wind_speed_10m || 0) >= 45) score += 3;
+  else if ((current.wind_speed_10m || 0) >= 25) score += 1;
+  if ((current.precipitation || 0) >= 5) score += 3;
+  else if ((current.precipitation || 0) > 0) score += 1;
+  if ((current.snowfall || 0) > 0) score += 2;
+  if ((current.temperature_2m ?? 20) <= 0) score += 1;
+  if (current.weather_code === 45 || current.weather_code === 48) score += 2;
+  return score;
+}
+
+function valueForLayer(layer, current) {
+  if (!current) return 0;
+  if (layer === "temperature") return current.temperature_2m ?? 0;
+  if (layer === "rain") return current.precipitation ?? 0;
+  if (layer === "wind") return current.wind_speed_10m ?? 0;
+  if (layer === "snow") return current.snowfall ?? 0;
+  if (layer === "cloud") return current.cloud_cover ?? 0;
+  if (layer === "risk") return getRiskValue(current);
+  return 0;
+}
+
+function interpolateColor(stops, value) {
+  if (value <= stops[0][0]) return stops[0][1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [v1, c1] = stops[i];
+    const [v2, c2] = stops[i + 1];
+    if (value <= v2) {
+      const t = (value - v1) / (v2 - v1);
+      return [
+        Math.round(c1[0] + (c2[0] - c1[0]) * t),
+        Math.round(c1[1] + (c2[1] - c1[1]) * t),
+        Math.round(c1[2] + (c2[2] - c1[2]) * t)
+      ];
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+function colorForValue(layer, value) {
+  if (layer === "temperature") {
+    return interpolateColor([
+      [-45, [23, 37, 84]], [0, [37, 99, 235]], [12, [6, 182, 212]],
+      [22, [34, 197, 94]], [32, [249, 115, 22]], [45, [127, 29, 29]]
+    ], value);
+  }
+  if (layer === "rain") {
+    return interpolateColor([[0, [34, 211, 238]], [1, [96, 165, 250]], [4, [167, 139, 250]], [8, [248, 113, 113]]], value);
+  }
+  if (layer === "wind") {
+    return interpolateColor([[0, [34, 211, 238]], [20, [250, 204, 21]], [40, [249, 115, 22]], [65, [220, 38, 38]]], value);
+  }
+  if (layer === "snow") {
+    return interpolateColor([[0, [147, 197, 253]], [1, [224, 242, 254]], [6, [255, 255, 255]]], value);
+  }
+  if (layer === "cloud") {
+    return interpolateColor([[0, [250, 204, 21]], [35, [147, 197, 253]], [75, [203, 213, 225]], [100, [248, 250, 252]]], value);
+  }
+  return interpolateColor([[0, [34, 197, 94]], [2, [250, 204, 21]], [4, [249, 115, 22]], [6, [220, 38, 38]]], value);
+}
+
+function formatValue(layer, value) {
+  if (layer === "temperature") return round(value, 0);
+  if (layer === "rain") return round(value, 1);
+  if (layer === "wind") return round(value, 0);
+  if (layer === "snow") return round(value, 1);
+  if (layer === "cloud") return round(value, 0);
+  return round(value, 0);
+}
+
+function markerOpacity(layer, value) {
+  if (layer === "rain" && value <= 0.05) return 0.45;
+  if (layer === "snow" && value <= 0.03) return 0.45;
+  if (layer === "wind" && value <= 5) return 0.55;
+  if (layer === "risk" && value <= 0) return 0.45;
+  return 1;
+}
+
+function buildMapStyle() {
+  return {
+    version: 8,
+    glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+    sources: {
+      base: {
+        type: "raster",
+        tiles: [`https://api.maptiler.com/maps/outdoor-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`],
+        tileSize: 256,
+        attribution: "© MapTiler © OpenStreetMap contributors"
+      },
+      countries: { type: "geojson", data: WORLD_COUNTRIES_URL },
+      terrain: {
+        type: "raster-dem",
+        tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        encoding: "terrarium",
+        attribution: "DEM tiles © AWS / Mapzen"
+      }
+    },
+    layers: [
+      { id: "background", type: "background", paint: { "background-color": "#071724" } },
+      {
+        id: "base",
+        type: "raster",
+        source: "base",
+        paint: {
+          "raster-saturation": -0.25,
+          "raster-brightness-min": 0.08,
+          "raster-brightness-max": 0.76,
+          "raster-contrast": 0.08
+        }
+      },
+      {
+        id: "hillshade",
+        type: "hillshade",
+        source: "terrain",
+        paint: {
+          "hillshade-shadow-color": "#020617",
+          "hillshade-highlight-color": "#7dd3fc",
+          "hillshade-accent-color": "#38bdf8",
+          "hillshade-exaggeration": 0.45
+        }
+      },
+      {
+        id: "country-lines",
+        type: "line",
+        source: "countries",
+        paint: {
+          "line-color": "rgba(255,255,255,0.52)",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.8, 8, 1.4, 11, 2.1],
+          "line-blur": 0.15
+        }
+      }
+    ]
+  };
+}
+
+function initMap() {
+  map = new maplibregl.Map({
+    container: "map",
+    center: DEFAULT_CENTER,
+    zoom: DEFAULT_ZOOM,
+    pitch: 45,
+    bearing: -12,
+    antialias: true,
+    style: buildMapStyle()
+  });
+
+  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+  map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
+
+  map.on("load", () => {
+    if (map.getSource("terrain")) {
+      map.setTerrain({ source: "terrain", exaggeration: 3 });
+      map.setSky({
+        "sky-color": "#020617",
+        "sky-horizon-blend": 0.3,
+        "horizon-color": "#082f49",
+        "horizon-fog-blend": 0.55,
+        "fog-color": "#0f172a",
+        "fog-ground-blend": 0.65
+      });
+    }
+    updateLegend();
+    ensureRouteLineLayer();
+    refreshCityWeather().catch((error) => { console.error(error); showBox("mapWarning", `Varos/idojaras frissitesi hiba: ${error.message || error}`); });
+    map.on("render", () => {
+      scheduleMarkerPositionUpdate();
+      scheduleRoutePositionUpdate();
+    });
+  });
+
+  map.on("moveend", scheduleCityWeather);
+  map.on("zoomend", scheduleCityWeather);
+  map.on("click", handleMapClick);
+}
+
+// ===========================================================================
+// Heatmap mode: city sampling, weather fetch, marker rendering
+// ===========================================================================
+
+function scheduleCityWeather() {
+  if (sampleTimer) clearTimeout(sampleTimer);
+  sampleTimer = setTimeout(() => refreshCityWeather().catch(console.error), refreshDelayMs);
+}
+
+function getCityQueryKey(bounds, zoom) {
+  const precision = zoom >= 9 ? 2 : 1;
+  return [
+    Math.floor(zoom),
+    bounds.getSouth().toFixed(precision),
+    bounds.getWest().toFixed(precision),
+    bounds.getNorth().toFixed(precision),
+    bounds.getEast().toFixed(precision)
+  ].join("|");
+}
+
+function distanceToMapCenter(city) {
+  const center = map.getCenter();
+  const dx = city.lng - center.lng;
+  const dy = city.lat - center.lat;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function estimateScreenCapacity() {
+  if (!map) return 18;
+  const el = map.getContainer();
+  const area = (el.clientWidth || 1200) * (el.clientHeight || 800);
+  const cellArea = MARKER_DECLUTTER_DIST * MARKER_DECLUTTER_DIST * 1.6;
+  return Math.max(8, Math.floor(area / cellArea));
+}
+
+function staticVisibleCities() {
+  if (!map) return [];
+  const bounds = map.getBounds();
+  const zoom = map.getZoom();
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const w = Math.abs(east - west) || 1e-6;
+  const h = Math.abs(north - south) || 1e-6;
+  const pad = zoom < 7 ? 0.08 : zoom < 9 ? 0.04 : 0.02;
+
+  const targetCount = Math.min(cityDisplayLimit, estimateScreenCapacity());
+
+  let candidates = CITY_SAMPLES.filter((c) =>
+    c.lng >= west - w * pad && c.lng <= east + w * pad &&
+    c.lat >= south - h * pad && c.lat <= north + h * pad
+  );
+
+  if (!candidates.length) {
+    return CITY_SAMPLES.slice()
+      .sort((a, b) => distanceToMapCenter(a) - distanceToMapCenter(b))
+      .slice(0, Math.min(6, targetCount));
+  }
+
+  if (candidates.length <= targetCount) {
+    return candidates.sort((a, b) => distanceToMapCenter(a) - distanceToMapCenter(b));
+  }
+
+  if (candidates.length > 320) {
+    candidates = candidates
+      .slice()
+      .sort((a, b) => distanceToMapCenter(a) - distanceToMapCenter(b))
+      .slice(0, 320);
+  }
+
+  const byCenter = candidates.slice().sort((a, b) => distanceToMapCenter(a) - distanceToMapCenter(b));
+  const picked = [byCenter[0]];
+  const rest = byCenter.slice(1);
+
+  while (picked.length < targetCount && rest.length) {
+    let bestIdx = 0;
+    let bestMinDist = -1;
+    for (let i = 0; i < rest.length; i++) {
+      let minDist = Infinity;
+      for (const p of picked) {
+        const dx = (rest[i].lng - p.lng) / w;
+        const dy = (rest[i].lat - p.lat) / h;
+        const d = dx * dx + dy * dy;
+        if (d < minDist) minDist = d;
+      }
+      if (minDist > bestMinDist) { bestMinDist = minDist; bestIdx = i; }
+    }
+    picked.push(rest.splice(bestIdx, 1)[0]);
+  }
+
+  return picked;
+}
+
+function overpassBboxArea(bounds) {
+  return Math.abs(bounds.getEast() - bounds.getWest()) * Math.abs(bounds.getNorth() - bounds.getSouth());
+}
+
+function buildOverpassQuery(bounds, zoom) {
+  const south = bounds.getSouth().toFixed(5);
+  const west = bounds.getWest().toFixed(5);
+  const north = bounds.getNorth().toFixed(5);
+  const east = bounds.getEast().toFixed(5);
+  const placeRegex = zoom >= 9 ? "^(city|town|village)$" : "^(city|town)$";
+  const targetCount = Math.min(cityDisplayLimit, estimateScreenCapacity());
+  return `[out:json][timeout:9];
+(
+  node["place"~"${placeRegex}"]["name"](${south},${west},${north},${east});
+);
+out tags qt ${Math.max(40, targetCount * 3)};`;
+}
+
+function cityFromOverpassElement(element) {
+  const tags = element.tags || {};
+  const population = Number(String(tags.population || "0").replace(/[^0-9]/g, "")) || 0;
+  return {
+    name: tags.name || tags["name:en"] || "Varos",
+    lat: element.lat,
+    lng: element.lon,
+    country: tags["addr:country"] || "",
+    place: tags.place || "",
+    population,
+    source: "overpass"
+  };
+}
+
+async function fetchOverpassCities(bounds, zoom, signal) {
+  if (zoom < OVERPASS_MIN_ZOOM) return null;
+  if (overpassBboxArea(bounds) > OVERPASS_MAX_BBOX_AREA) return null;
+
+  const targetCount = Math.min(cityDisplayLimit, estimateScreenCapacity());
+  const key = `${getCityQueryKey(bounds, zoom)}|${targetCount}`;
+  const cached = cityQueryCache.get(key);
+  if (cached) return cached;
+
+  const url = `${OVERPASS_API_URL}?data=${encodeURIComponent(buildOverpassQuery(bounds, zoom))}`;
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(`Overpass hiba: ${response.status}`);
+
+  const data = await response.json();
+  const seen = new Set();
+  const cities = (data.elements || [])
+    .filter((element) => Number.isFinite(element.lat) && Number.isFinite(element.lon) && element.tags && element.tags.name)
+    .map(cityFromOverpassElement)
+    .filter((city) => {
+      const dedupeKey = `${city.name}|${city.lat.toFixed(3)}|${city.lng.toFixed(3)}`;
+      if (seen.has(dedupeKey)) return false;
+      seen.add(dedupeKey);
+      return true;
+    })
+    .sort((a, b) => {
+      const placeRank = { city: 0, town: 1, village: 2 };
+      const rankA = placeRank[a.place] ?? 3;
+      const rankB = placeRank[b.place] ?? 3;
+      if (rankA !== rankB) return rankA - rankB;
+      if (b.population !== a.population) return b.population - a.population;
+      return distanceToMapCenter(a) - distanceToMapCenter(b);
+    })
+    .slice(0, targetCount);
+
+  cityQueryCache.set(key, cities);
+  return cities;
+}
+
+async function getVisibleCities(signal) {
+  const staticCities = staticVisibleCities();
+  if (!map) return staticCities;
+
+  const bounds = map.getBounds();
+  const zoom = map.getZoom();
+
+  if (zoom < OVERPASS_MIN_ZOOM || overpassBboxArea(bounds) > OVERPASS_MAX_BBOX_AREA) {
+    return staticCities;
+  }
+
+  try {
+    const onlineCities = await fetchOverpassCities(bounds, zoom, signal);
+    if (signal && signal.aborted) return [];
+    if (onlineCities && onlineCities.length) return onlineCities;
+  } catch (error) {
+    console.warn("Online city lookup failed, using static fallback.", error);
+  }
+
+  return staticCities;
+}
+
+function cacheKey(city) { return `${city.lat.toFixed(2)},${city.lng.toFixed(2)}`; }
+
+async function fetchCityWeather(city, signal) {
+  const key = cacheKey(city);
+  const cached = weatherCache.get(key);
+  if (cached && Date.now() - cached.time < WEATHER_POINT_TTL_MS) {
+    return { ...cached.value, ...city };
+  }
+
+  let lastError = null;
+  for (let attempt = 0; attempt <= WEATHER_FETCH_RETRY_MAX; attempt++) {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    try {
+      const response = await fetch(makeOpenMeteoUrl(city.lat, city.lng), { signal });
+      if (response.status === 429) {
+        const waitMs = 500 * Math.pow(2, attempt) + Math.random() * 200;
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        lastError = new Error("Open-Meteo hiba: 429");
+        continue;
+      }
+      if (!response.ok) throw new Error(`Open-Meteo hiba: ${response.status}`);
+      const data = await response.json();
+      const value = { ...city, current: data.current };
+      weatherCache.set(key, { time: Date.now(), value });
+      return value;
+    } catch (error) {
+      if (error && error.name === "AbortError") throw error;
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Open-Meteo hiba: ismeretlen");
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  let cursor = 0;
+  const results = new Array(items.length);
+  async function runNext() {
+    while (cursor < items.length) {
+      const i = cursor++;
+      try {
+        results[i] = { status: "fulfilled", value: await worker(items[i], i) };
+      } catch (error) {
+        results[i] = { status: "rejected", reason: error };
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, runNext);
+  await Promise.all(workers);
+  return results;
+}
+
+async function refreshCityWeather() {
+  if (!map || !map.isStyleLoaded()) return;
+  if (appMode !== "heatmap") return;
+  if (!pointsEnabled) {
+    clearCityMarkers();
+    setText("sampleCount", "0 varos");
+    updateStats([]);
+    setLoading(false);
+    return;
+  }
+
+  if (sampleAbortController) sampleAbortController.abort();
+  sampleAbortController = new AbortController();
+  const signal = sampleAbortController.signal;
+
+  setLoading(true);
+  try {
+    const cities = await getVisibleCities(signal);
+    if (signal.aborted) return;
+
+    showBox("errorBox", "");
+    setText("sampleCount", `${cities.length} varos frissul`);
+    renderCityPlaceholders(cities);
+
+    if (!cities.length) {
+      const fallbackCities = CITY_SAMPLES
+        .slice()
+        .sort((a, b) => distanceToMapCenter(a) - distanceToMapCenter(b))
+        .slice(0, Math.min(6, cityDisplayLimit));
+      if (fallbackCities.length) {
+        renderCityPlaceholders(fallbackCities);
+        cities.push(...fallbackCities);
+      } else {
+        clearCityMarkers();
+        updateStats([]);
+        setText("sampleCount", "0 varos");
+        showBox("errorBox", "Ebben a nezetben nem talaltam varost. Zoomolj kijjebb vagy mozgasd a terkepet.");
+        return;
+      }
+    }
+
+    const results = [];
+    const settled = await runWithConcurrency(cities, WEATHER_FETCH_CONCURRENCY, async (city) => {
+      const weather = await fetchCityWeather(city, signal);
+      if (signal.aborted) return;
+      results.push(weather);
+      renderCityMarkers(results);
+      updateStats(results.map(cityWeatherToSample));
+      setText("sampleCount", `${results.length}/${cities.length} varos`);
+    });
+
+    if (signal.aborted) return;
+    latestCitySamples = results;
+    renderCityMarkers(results);
+    updateStats(results.map(cityWeatherToSample));
+
+    if (!results.length) {
+      const firstError = settled.find((item) => item.status === "rejected");
+      const reasonMessage = firstError && firstError.reason && firstError.reason.message ? firstError.reason.message : "";
+      const message = reasonMessage.includes("429")
+        ? "Az idojaras-szolgaltato (Open-Meteo) atmenetileg korlatozza a kereseket. Varj nehany masodpercet, majd probald ujra, vagy valassz \"Normal\" frissitest."
+        : (reasonMessage || "Nem sikerult varosi idojarasadatokat lekerni ehhez a nezethez.");
+      showBox("errorBox", message);
+    }
+  } finally {
+    if (!signal.aborted) setLoading(false);
+  }
+}
+
+function cityWeatherToSample(item) {
+  return { value: valueForLayer(activeWeatherLayer, item.current) };
+}
+
+function clearCityMarkers() {
+  const overlay = document.getElementById("cityOverlay");
+  if (overlay) overlay.innerHTML = "";
+  latestRenderedMarkerItems = [];
+  lastMarkerHTMLKey = "";
+}
+
+function renderCityPlaceholders(cities) {
+  if (!map || !pointsEnabled) return;
+  const placeholderItems = cities.map((city) => ({
+    ...city,
+    current: null,
+    placeholder: true
+  }));
+  renderCityMarkers(placeholderItems);
+}
+
+function compactCityName(name) {
+  const normalized = String(name || "").trim();
+  if (normalized.length <= 16) return normalized;
+  const parts = normalized.split(/[\s-]+/).filter(Boolean);
+  if (parts.length > 1) {
+    const initials = parts.slice(1).map((part) => part[0]).join("");
+    const first = parts[0].slice(0, 11);
+    const candidate = `${first} ${initials}`.trim();
+    if (candidate.length <= 16) return candidate;
+  }
+  return `${normalized.slice(0, 14)}…`;
+}
+
+function markerSetKey(items) {
+  return items.map((item) => {
+    const v = item.current ? Math.round(valueForLayer(activeWeatherLayer, item.current) * 10) : "x";
+    return `${item.name}:${v}`;
+  }).join("|") + `#${activeWeatherLayer}`;
+}
+
+function renderCityMarkers(items) {
+  latestRenderedMarkerItems = items.slice();
+  const overlay = document.getElementById("cityOverlay");
+  if (!overlay) return;
+
+  if (!pointsEnabled) {
+    overlay.innerHTML = "";
+    lastMarkerHTMLKey = "";
+    return;
+  }
+
+  const key = markerSetKey(items);
+  if (key !== lastMarkerHTMLKey) {
+    lastMarkerHTMLKey = key;
+    overlay.innerHTML = items.map((item, index) => {
+      const hasWeather = Boolean(item.current);
+      const value = hasWeather ? valueForLayer(activeWeatherLayer, item.current) : 0;
+      const [r, g, b] = hasWeather ? colorForValue(activeWeatherLayer, value) : [148, 163, 184];
+      const color = `rgb(${r}, ${g}, ${b})`;
+      const glow = `rgba(${r}, ${g}, ${b}, 0.55)`;
+      const unit = hasWeather ? layerConfig[activeWeatherLayer].unit : "";
+      const label = hasWeather ? `${formatValue(activeWeatherLayer, value)}${unit}` : "⋯";
+      const opacity = hasWeather ? markerOpacity(activeWeatherLayer, value) : 0.72;
+      const ringDelay = (index % 5) * 0.4;
+      const loadingClass = hasWeather ? "" : " is-loading";
+
+      return `
+        <div class="overlay-city-marker${loadingClass}" data-marker-index="${index}" style="--marker-color:${color}; --marker-glow:${glow}; opacity:${opacity}">
+          <div class="overlay-city-bubble" title="${item.name}">
+            <span class="overlay-city-value">${label}</span>
+          </div>
+          <div class="overlay-city-pin"></div>
+          <div class="overlay-city-base">
+            <span class="overlay-city-ring" style="--ring-delay:${ringDelay}s"></span>
+            <span class="overlay-city-ring overlay-city-ring-2" style="--ring-delay:${ringDelay}s"></span>
+            <span class="overlay-city-dot"></span>
+            <span class="overlay-city-name">${compactCityName(item.name || "Varos")}</span>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  scheduleMarkerPositionUpdate();
+}
+
+function scheduleMarkerPositionUpdate() {
+  if (positionFrameQueued) return;
+  positionFrameQueued = true;
+  requestAnimationFrame(() => {
+    positionFrameQueued = false;
+    updateCityMarkerPositions();
+  });
+}
+
+function updateCityMarkerPositions() {
+  if (!map || !latestRenderedMarkerItems || !latestRenderedMarkerItems.length) return;
+  const overlay = document.getElementById("cityOverlay");
+  if (!overlay) return;
+
+  const width = map.getContainer().clientWidth;
+  const height = map.getContainer().clientHeight;
+  const margin = 100;
+  const center = map.getCenter();
+
+  const points = latestRenderedMarkerItems.map((item, index) => {
+    const p = map.project([item.lng, item.lat]);
+    const dx = item.lng - center.lng;
+    const dy = item.lat - center.lat;
+    const rank = ({ city: 0, town: 1, village: 2 })[item.place] ?? 1;
+    const pop = Math.min(item.population || 0, 999999);
+    const priority = rank * 1e6 + Math.hypot(dx, dy) * 1e3 - pop * 1e-3;
+    return { index, x: p.x, y: p.y, priority };
+  });
+
+  points.sort((a, b) => a.priority - b.priority);
+
+  const placed = [];
+  const shown = new Map();
+  for (const pt of points) {
+    const onScreen = pt.x > -margin && pt.x < width + margin && pt.y > -margin && pt.y < height + margin;
+    if (!onScreen) continue;
+    let collides = false;
+    for (const o of placed) {
+      if (Math.abs(pt.x - o.x) < MARKER_DECLUTTER_DIST && Math.abs(pt.y - o.y) < MARKER_DECLUTTER_DIST) {
+        if (Math.hypot(pt.x - o.x, pt.y - o.y) < MARKER_DECLUTTER_DIST) { collides = true; break; }
+      }
+    }
+    if (collides) continue;
+    placed.push(pt);
+    shown.set(pt.index, pt);
+  }
+
+  const markers = overlay.querySelectorAll(".overlay-city-marker");
+  markers.forEach((el) => {
+    const index = Number(el.dataset.markerIndex);
+    const pt = shown.get(index);
+    if (!pt) { el.style.display = "none"; return; }
+    el.style.display = "flex";
+    el.style.left = `${pt.x}px`;
+    el.style.top = `${pt.y}px`;
+  });
+
+  if (pointsEnabled && !isLoading) {
+    const total = latestRenderedMarkerItems.length;
+    const vis = shown.size;
+    const txt = vis < total ? `${vis}/${total} lathato` : `${total} varos`;
+    if (txt !== lastSampleCountText) {
+      lastSampleCountText = txt;
+      setText("sampleCount", txt);
+    }
+  }
+}
+
+function updateLegend() {
+  const c = layerConfig[activeWeatherLayer];
+  setText("legendTitle", c.title);
+  setText("legendUnit", c.unit);
+  setText("legendMin", c.minLabel);
+  setText("legendMid", c.midLabel);
+  setText("legendMax", c.maxLabel);
+  const grad = document.getElementById("legendGradient");
+  if (grad) grad.style.background = c.gradient;
+  setText("legendNote", activeWeatherLayer === "temperature"
+    ? "Fix hoskala: 22 °C zold; hidegebb ertekek kekbe, melegebb ertekek pirosba futnak."
+    : "A varosjelolok az adott varos aktualis erteket mutatjak.");
+}
+
+function updateStats(samples) {
+  if (!samples.length) {
+    setText("statMin", "–");
+    setText("statAvg", "–");
+    setText("statMax", "–");
+    return;
+  }
+  const values = samples.map((s) => s.value).filter(Number.isFinite);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const avg = values.reduce((a, b) => a + b, 0) / values.length;
+  const unit = layerConfig[activeWeatherLayer].unit;
+  const decimals = activeWeatherLayer === "temperature" || activeWeatherLayer === "rain" || activeWeatherLayer === "snow" ? 1 : 0;
+  setText("statMin", `${round(min, decimals)} ${unit}`);
+  setText("statAvg", `${round(avg, decimals)} ${unit}`);
+  setText("statMax", `${round(max, decimals)} ${unit}`);
+}
+
+function setBaseMapVisibility(visible) {
+  if (!map) return;
+  const visibility = visible ? "visible" : "none";
+  ["base", "country-lines"].forEach((id) => {
+    if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
+  });
+}
+
+// ===========================================================================
+// Route mode: click-to-add points, city snapping, speed presets, route line
+// ===========================================================================
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Computes the cumulative as-the-crow-flies distance/time from the route
+// start to each point, assuming departure is "now" and travel proceeds at a
+// constant routeSpeedKmh. Returns an array aligned with routePoints, each
+// entry { point, distanceKm, etaDate }.
+function computeRouteEtas() {
+  const now = Date.now();
+  let cumulativeKm = 0;
+  return routePoints.map((point, index) => {
+    if (index > 0) {
+      const prev = routePoints[index - 1];
+      cumulativeKm += haversineKm(prev.lat, prev.lng, point.lat, point.lng);
+    }
+    const hours = routeSpeedKmh > 0 ? cumulativeKm / routeSpeedKmh : 0;
+    const etaDate = new Date(now + hours * 3600 * 1000);
+    return { point, distanceKm: cumulativeKm, etaDate };
+  });
+}
+
+function formatEtaTime(date) {
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// Fetches the hourly-forecast weather for every route point at its estimated
+// arrival time, with the same bounded-concurrency + 429-retry approach used
+// for heatmap cities. Results are cached by point id so re-renders (e.g. a
+// layer switch) don't re-fetch unless the ETA or location actually changed.
+async function refreshRouteWeather() {
+  if (appMode !== "route" || routePoints.length === 0) return;
+
+  if (routeWeatherAbortController) routeWeatherAbortController.abort();
+  routeWeatherAbortController = new AbortController();
+  const signal = routeWeatherAbortController.signal;
+  const myToken = ++routeWeatherRequestToken;
+
+  const etas = computeRouteEtas();
+
+  await runWithConcurrency(etas, WEATHER_FETCH_CONCURRENCY, async ({ point, etaDate }) => {
+    const cacheKey = `${point.id}|${etaDate.toISOString().slice(0, 13)}`;
+    const cached = routeWeatherByPointId.get(point.id);
+    if (cached && cached.cacheKey === cacheKey) return;
+
+    let lastError = null;
+    for (let attempt = 0; attempt <= WEATHER_FETCH_RETRY_MAX; attempt++) {
+      if (signal.aborted) return;
+      try {
+        const response = await fetch(makeOpenMeteoHourlyUrl(point.lat, point.lng), { signal });
+        if (response.status === 429) {
+          const waitMs = 500 * Math.pow(2, attempt) + Math.random() * 200;
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          lastError = new Error("Open-Meteo hiba: 429");
+          continue;
+        }
+        if (!response.ok) throw new Error(`Open-Meteo hiba: ${response.status}`);
+        const data = await response.json();
+        const current = pickHourlyForecastAt(data.hourly, etaDate);
+        if (myToken !== routeWeatherRequestToken) return;
+        routeWeatherByPointId.set(point.id, { current, etaDate, cacheKey });
+        renderRouteOverlay();
+        return;
+      } catch (error) {
+        if (error && error.name === "AbortError") return;
+        lastError = error;
+      }
+    }
+    console.warn("Route weather fetch failed for point", point.name, lastError);
+  });
+}
+
+let routeWeatherDebounceTimer = null;
+function scheduleRouteWeatherRefresh() {
+  if (routeWeatherDebounceTimer) clearTimeout(routeWeatherDebounceTimer);
+  routeWeatherDebounceTimer = setTimeout(() => {
+    refreshRouteWeather().catch((error) => console.error("Route weather refresh failed", error));
+  }, 250);
+}
+
+function findNearestCityWithin(lat, lng, km) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const city of CITY_SAMPLES) {
+    const d = haversineKm(lat, lng, city.lat, city.lng);
+    if (d < bestDist) { bestDist = d; best = city; }
+  }
+  if (best && bestDist <= km) return { city: best, distanceKm: bestDist };
+  return null;
+}
+
+function formatCoord(value) {
+  return value.toFixed(3);
+}
+
+function handleMapClick(e) {
+  if (appMode !== "route" || !routeAddingActive) return;
+  if (routePoints.length >= ROUTE_MAX_POINTS) {
+    showBox("errorBox", `Az utvonal legfeljebb ${ROUTE_MAX_POINTS} pontot tartalmazhat.`);
+    return;
+  }
+
+  const { lat, lng } = e.lngLat;
+  const snap = findNearestCityWithin(lat, lng, ROUTE_CITY_SNAP_KM);
+
+  const point = snap
+    ? { id: `${Date.now()}-${routePoints.length}`, name: snap.city.name, lat: snap.city.lat, lng: snap.city.lng, isCity: true }
+    : { id: `${Date.now()}-${routePoints.length}`, name: `Pont (${formatCoord(lat)}, ${formatCoord(lng)})`, lat, lng, isCity: false };
+
+  routePoints.push(point);
+  renderRouteList();
+  renderRouteOverlay();
+  scheduleRouteWeatherRefresh();
+}
+
+function renderRouteList() {
+  const container = document.getElementById("routeList");
+  if (!container) return;
+
+  if (!routePoints.length) {
+    container.innerHTML = `<div class="route-list-empty">Meg nincs utvonalpont. Kattints a terkepre a hozzaadashoz.</div>`;
+    setText("routePointCount", `0/${ROUTE_MAX_POINTS} pont`);
+    return;
+  }
+
+  container.innerHTML = routePoints.map((point, index) => `
+    <div class="route-list-item" data-point-id="${point.id}">
+      <span class="route-list-badge">${index + 1}</span>
+      <span class="route-list-name">${point.name}</span>
+      <button class="route-list-remove" data-remove-id="${point.id}" type="button">✕</button>
+    </div>
+  `).join("");
+
+  container.querySelectorAll(".route-list-remove").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const id = btn.dataset.removeId;
+      routePoints = routePoints.filter((p) => p.id !== id);
+      routeWeatherByPointId.delete(id);
+      renderRouteList();
+      renderRouteOverlay();
+      scheduleRouteWeatherRefresh();
+    });
+  });
+
+  setText("routePointCount", `${routePoints.length}/${ROUTE_MAX_POINTS} pont`);
+}
+
+function buildRouteLineGeoJSON() {
+  return {
+    type: "Feature",
+    geometry: {
+      type: "LineString",
+      coordinates: routePoints.map((p) => [p.lng, p.lat])
+    }
+  };
+}
+
+function ensureRouteLineLayer() {
+  if (!map) return false;
+  if (!map.isStyleLoaded()) {
+    setTimeout(() => { ensureRouteLineLayer(); updateRouteLineData(); }, 150);
+    return false;
+  }
+  if (!map.getSource("route-line-source")) {
+    map.addSource("route-line-source", {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] }
+    });
+    map.addLayer({
+      id: "route-line-glow",
+      type: "line",
+      source: "route-line-source",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#0c4a6e",
+        "line-width": 7,
+        "line-blur": 6,
+        "line-opacity": 0.5
+      }
+    });
+    map.addLayer({
+      id: "route-line-dash",
+      type: "line",
+      source: "route-line-source",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#0369a1",
+        "line-width": 3,
+        "line-opacity": 0.95,
+        "line-dasharray": [0.4, 1.8]
+      }
+    });
+  }
+  return true;
+}
+
+function updateRouteLineData() {
+  if (!map || !map.getSource("route-line-source")) return;
+  const features = routePoints.length >= 2 ? [buildRouteLineGeoJSON()] : [];
+  map.getSource("route-line-source").setData({ type: "FeatureCollection", features });
+}
+
+// Route line dash is intentionally STATIC (no setPaintProperty animation).
+// Animating line-dasharray via MapLibre's paint property repeatedly re-builds
+// the line shader's dash texture; on some GPUs/drivers this throws inside
+// line_program.ts when a segment rounds to ~0, which can abort the whole
+// frame and blank out the map. The moving "energy trail" effect is instead
+// achieved with a separate CSS-animated DOM dot riding along the route
+// (see renderRouteOverlay / the route-energy-dot element).
+function animateRouteDash() {
+  routeDashAnimFrame = null;
+}
+
+function renderRouteOverlay() {
+  ensureRouteLineLayer();
+  updateRouteLineData();
+
+  const overlay = document.getElementById("routeOverlay");
+  if (overlay) {
+    const etas = computeRouteEtas();
+    const markersHtml = routePoints.map((point, index) => {
+      const weather = routeWeatherByPointId.get(point.id);
+      const hasWeather = Boolean(weather && weather.current);
+      const eta = etas[index] ? etas[index].etaDate : null;
+      const value = hasWeather ? valueForLayer(routeWeatherLayer, weather.current) : 0;
+      const [r, g, b] = hasWeather ? colorForValue(routeWeatherLayer, value) : [56, 189, 248];
+      const color = `rgb(${r}, ${g}, ${b})`;
+      const valueLabel = hasWeather
+        ? `${formatValue(routeWeatherLayer, value)}${layerConfig[routeWeatherLayer].unit}`
+        : "⋯";
+      const etaLabel = eta ? formatEtaTime(eta) : "";
+
+      return `
+        <div class="route-marker" data-route-marker-index="${index}">
+          <div class="route-marker-ring"></div>
+          <div class="route-marker-core" style="--route-marker-color:${color}">
+            <span class="route-marker-badge">${index + 1}</span>
+            <span class="route-marker-value">${valueLabel}</span>
+          </div>
+          <div class="route-marker-name">
+            <span class="route-marker-name-text">${point.name}</span>
+            ${etaLabel ? `<span class="route-marker-eta">${etaLabel}</span>` : ""}
+          </div>
+        </div>
+      `;
+    }).join("");
+    const energyDotHtml = routePoints.length >= 2
+      ? `<div class="route-energy-dot" id="routeEnergyDot"></div>`
+      : "";
+    overlay.innerHTML = markersHtml + energyDotHtml;
+  }
+
+  scheduleRoutePositionUpdate();
+  startRouteEnergyLoop();
+}
+
+// The energy dot needs to keep moving even when the map itself is static (no
+// pan/zoom/terrain animation triggering MapLibre's own "render" event), so it
+// runs its own independent requestAnimationFrame loop instead of piggybacking
+// on map render events.
+let routeEnergyLoopFrame = null;
+function startRouteEnergyLoop() {
+  if (routeEnergyLoopFrame !== null) return;
+  function tick() {
+    if (appMode !== "route" || routePoints.length < 2) {
+      routeEnergyLoopFrame = null;
+      return;
+    }
+    updateRouteEnergyDot();
+    routeEnergyLoopFrame = requestAnimationFrame(tick);
+  }
+  routeEnergyLoopFrame = requestAnimationFrame(tick);
+}
+
+function scheduleRoutePositionUpdate() {
+  if (appMode !== "route" || !routePoints.length) return;
+  if (routePositionFrameQueued) return;
+  routePositionFrameQueued = true;
+  requestAnimationFrame(() => {
+    routePositionFrameQueued = false;
+    updateRouteMarkerPositions();
+  });
+}
+
+function updateRouteMarkerPositions() {
+  if (!map) return;
+  const overlay = document.getElementById("routeOverlay");
+  if (!overlay) return;
+  const markers = overlay.querySelectorAll(".route-marker");
+  markers.forEach((el) => {
+    const index = Number(el.dataset.routeMarkerIndex);
+    const point = routePoints[index];
+    if (!point) { el.style.display = "none"; return; }
+    const p = map.project([point.lng, point.lat]);
+    el.style.display = "flex";
+    el.style.left = `${p.x}px`;
+    el.style.top = `${p.y}px`;
+  });
+
+  updateRouteEnergyDot();
+}
+
+// Moves a small glowing dot continuously along the full route polyline, in
+// screen space, to create the Death-Stranding-style "energy trail" effect.
+// This is plain DOM/CSS-driven (a requestAnimationFrame loop updating
+// left/top), so it never touches MapLibre's line shader/paint properties and
+// cannot trigger the line_program dash-texture crash.
+let routeEnergyProgress = 0;
+function updateRouteEnergyDot() {
+  if (appMode !== "route" || routePoints.length < 2) return;
+  const dot = document.getElementById("routeEnergyDot");
+  if (!dot || !map) return;
+
+  const screenPoints = routePoints.map((p) => map.project([p.lng, p.lat]));
+  const segLengths = [];
+  let totalLength = 0;
+  for (let i = 0; i < screenPoints.length - 1; i++) {
+    const d = Math.hypot(screenPoints[i + 1].x - screenPoints[i].x, screenPoints[i + 1].y - screenPoints[i].y);
+    segLengths.push(d);
+    totalLength += d;
+  }
+  if (totalLength <= 0) { dot.style.display = "none"; return; }
+
+  routeEnergyProgress = (routeEnergyProgress + 1.6) % totalLength;
+  let remaining = routeEnergyProgress;
+  let segIndex = 0;
+  while (segIndex < segLengths.length && remaining > segLengths[segIndex]) {
+    remaining -= segLengths[segIndex];
+    segIndex++;
+  }
+  if (segIndex >= segLengths.length) segIndex = segLengths.length - 1;
+
+  const a = screenPoints[segIndex];
+  const b = screenPoints[segIndex + 1];
+  const segLen = segLengths[segIndex] || 1;
+  const t = clamp(remaining / segLen, 0, 1);
+  const x = a.x + (b.x - a.x) * t;
+  const y = a.y + (b.y - a.y) * t;
+
+  dot.style.display = "block";
+  dot.style.left = `${x}px`;
+  dot.style.top = `${y}px`;
+}
+
+function clearRoute() {
+  routePoints = [];
+  routeWeatherByPointId.clear();
+  if (routeWeatherAbortController) routeWeatherAbortController.abort();
+  renderRouteList();
+  renderRouteOverlay();
+  updateRouteLineData();
+}
+
+function setRouteAdding(active) {
+  routeAddingActive = active;
+  const btn = document.getElementById("routeAddBtn");
+  if (btn) {
+    btn.classList.toggle("active", active);
+    btn.textContent = active ? "Kattints a terkepre a pont hozzaadasahoz…" : "+ Pont hozzaadasa";
+  }
+}
+
+function selectRouteSpeedPreset(key) {
+  const preset = ROUTE_SPEED_PRESETS.find((p) => p.key === key);
+  if (!preset) return;
+  routeSelectedPresetKey = key;
+  routeSpeedKmh = preset.kmh;
+  syncRouteSpeedUI();
+  scheduleRouteWeatherRefresh();
+  renderRouteOverlay();
+}
+
+function syncRouteSpeedUI() {
+  document.querySelectorAll(".route-speed-btn").forEach((btn) => {
+    btn.classList.toggle("selected", btn.dataset.speedKey === routeSelectedPresetKey);
+  });
+  const slider = document.getElementById("routeSpeedSlider");
+  if (slider) slider.value = String(routeSpeedKmh);
+  setText("routeSpeedValue", `${routeSpeedKmh} km/h`);
+}
+
+// ===========================================================================
+// Mode switching (heatmap <-> route)
+// ===========================================================================
+
+function setAppMode(mode) {
+  if (appMode === mode) return;
+  appMode = mode;
+  const isRoute = mode === "route";
+
+  document.body.classList.toggle("route-mode", isRoute);
+  const panelEl = document.getElementById("panel");
+  if (panelEl) panelEl.classList.toggle("route-theme", isRoute);
+  const heatmapContent = document.getElementById("heatmapPanelContent");
+  if (heatmapContent) heatmapContent.classList.toggle("hidden", isRoute);
+  const routeContent = document.getElementById("routePanelContent");
+  if (routeContent) routeContent.classList.toggle("hidden", !isRoute);
+  const weatherModeBtnEl = document.getElementById("weatherModeBtn");
+  if (weatherModeBtnEl) weatherModeBtnEl.classList.toggle("active", !isRoute);
+  const routeModeBtnEl = document.getElementById("routeModeBtn");
+  if (routeModeBtnEl) routeModeBtnEl.classList.toggle("active", isRoute);
+  const cityOverlayEl = document.getElementById("cityOverlay");
+  if (cityOverlayEl) cityOverlayEl.classList.toggle("hidden", isRoute);
+  const routeOverlayEl = document.getElementById("routeOverlay");
+  if (routeOverlayEl) routeOverlayEl.classList.toggle("hidden", !isRoute);
+
+  setText("panelTitle", isRoute ? ROUTE_MODE_TITLE : HEATMAP_MODE_TITLE);
+  setText("panelLead", isRoute ? ROUTE_MODE_LEAD : HEATMAP_MODE_LEAD);
+
+  if (isRoute) {
+    renderRouteOverlay();
+    refreshRouteWeather().catch((error) => console.error("Route weather refresh failed", error));
+  } else {
+    setRouteAdding(false);
+    refreshCityWeather().catch(console.error);
+  }
+}
+
+// ===========================================================================
+// Control bindings
+// ===========================================================================
+
+function bindControls() {
+  const cityLimitSlider = document.getElementById("cityLimitSlider");
+  if (cityLimitSlider) {
+    cityDisplayLimit = Number(cityLimitSlider.value) || 18;
+    setText("cityLimitLabel", `${cityDisplayLimit} db`);
+    cityLimitSlider.addEventListener("input", (event) => {
+      cityDisplayLimit = Number(event.target.value) || 18;
+      setText("cityLimitLabel", `${cityDisplayLimit} db`);
+      refreshCityWeather();
+    });
+  }
+
+  const mapBaseBtn = document.getElementById("mapBaseBtn");
+  if (mapBaseBtn) {
+    mapBaseBtn.addEventListener("click", () => {
+      mapBaseEnabled = !mapBaseEnabled;
+      mapBaseBtn.textContent = mapBaseEnabled ? "Bekapcsolva" : "Kikapcsolva";
+      mapBaseBtn.classList.toggle("active", mapBaseEnabled);
+      setBaseMapVisibility(mapBaseEnabled);
+    });
+  }
+
+  const pointsBtn = document.getElementById("pointsBtn");
+  if (pointsBtn) {
+    pointsBtn.addEventListener("click", () => {
+      pointsEnabled = !pointsEnabled;
+      pointsBtn.textContent = pointsEnabled ? "Bekapcsolva" : "Kikapcsolva";
+      pointsBtn.classList.toggle("active", pointsEnabled);
+      if (pointsEnabled) refreshCityWeather();
+      else {
+        clearCityMarkers();
+        updateStats([]);
+        setText("sampleCount", "0 varos");
+        lastSampleCountText = "0 varos";
+        setLoading(false);
+      }
+    });
+  }
+
+  const refreshSpeedBtn = document.getElementById("refreshSpeedBtn");
+  if (refreshSpeedBtn) {
+    refreshSpeedBtn.addEventListener("click", () => {
+      const goFast = refreshDelayMs !== REFRESH_DELAY_FAST;
+      refreshDelayMs = goFast ? REFRESH_DELAY_FAST : REFRESH_DELAY_NORMAL;
+      refreshSpeedBtn.textContent = goFast ? "Gyors" : "Normal";
+      refreshSpeedBtn.classList.toggle("active", goFast);
+    });
+  }
+
+  document.querySelectorAll(".layer-btn:not(.route-layer-btn)").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeWeatherLayer = button.dataset.layer;
+      document.querySelectorAll(".layer-btn:not(.route-layer-btn)").forEach((b) => b.classList.remove("selected"));
+      button.classList.add("selected");
+      updateLegend();
+      renderCityMarkers(latestCitySamples);
+      updateStats(latestCitySamples.map(cityWeatherToSample));
+    });
+  });
+
+  const hamburgerBtn = document.getElementById("hamburgerBtn");
+  const panel = document.getElementById("panel");
+  const topbarTitle = document.getElementById("topbarTitle");
+  const isMobile = window.matchMedia("(max-width: 640px)").matches;
+
+  function setPanelOpen(open) {
+    if (panel) panel.classList.toggle("collapsed", !open);
+    if (hamburgerBtn) hamburgerBtn.classList.toggle("open", open);
+    if (topbarTitle) topbarTitle.classList.toggle("show", !open);
+  }
+
+  setPanelOpen(!isMobile);
+
+  if (hamburgerBtn) {
+    hamburgerBtn.addEventListener("click", () => {
+      const willOpen = panel.classList.contains("collapsed");
+      setPanelOpen(willOpen);
+    });
+  }
+
+  const weatherModeBtn = document.getElementById("weatherModeBtn");
+  if (weatherModeBtn) {
+    weatherModeBtn.addEventListener("click", () => setAppMode("heatmap"));
+  }
+
+  const routeModeBtn = document.getElementById("routeModeBtn");
+  if (routeModeBtn) {
+    routeModeBtn.addEventListener("click", () => setAppMode("route"));
+  }
+
+  const routeAddBtn = document.getElementById("routeAddBtn");
+  if (routeAddBtn) {
+    routeAddBtn.addEventListener("click", () => setRouteAdding(!routeAddingActive));
+  }
+
+  const routeClearBtn = document.getElementById("routeClearBtn");
+  if (routeClearBtn) {
+    routeClearBtn.addEventListener("click", clearRoute);
+  }
+
+  document.querySelectorAll(".route-speed-btn").forEach((btn) => {
+    btn.addEventListener("click", () => selectRouteSpeedPreset(btn.dataset.speedKey));
+  });
+
+  const routeSpeedSlider = document.getElementById("routeSpeedSlider");
+  if (routeSpeedSlider) {
+    routeSpeedSlider.addEventListener("input", (event) => {
+      routeSpeedKmh = clamp(Number(event.target.value) || routeSpeedKmh, ROUTE_SPEED_MIN, ROUTE_SPEED_MAX);
+      routeSelectedPresetKey = null;
+      document.querySelectorAll(".route-speed-btn").forEach((b) => b.classList.remove("selected"));
+      setText("routeSpeedValue", `${routeSpeedKmh} km/h`);
+      scheduleRouteWeatherRefresh();
+      renderRouteOverlay();
+    });
+  }
+
+  document.querySelectorAll(".route-layer-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      routeWeatherLayer = button.dataset.layer;
+      document.querySelectorAll(".route-layer-btn").forEach((b) => b.classList.remove("selected"));
+      button.classList.add("selected");
+      renderRouteOverlay();
+    });
+  });
+
+  renderRouteList();
+  syncRouteSpeedUI();
+}
+
+function runSelfTests() {
+  console.assert(round(null) === "–", "Null values should render as dash");
+  console.assert(colorForValue("temperature", 22)[1] === 197, "22 C should map to green");
+  console.assert(CITY_SAMPLES.length >= 500, "City sample list should provide EU administrative fallback coverage");
+  console.assert(valueForLayer("cloud", { cloud_cover: 86 }) === 86, "Cloud value should be extracted");
+  console.assert(typeof buildOverpassQuery === "function", "Online city lookup should be available");
+  console.assert(typeof compactCityName === "function", "City name compactor should exist");
+  console.assert(typeof renderCityMarkers === "function", "City marker renderer should exist");
+  console.assert(typeof updateCityMarkerPositions === "function", "City weather overlay must update marker screen positions");
+  console.assert(typeof staticVisibleCities === "function", "Spread-based city selector should exist");
+  console.assert(typeof estimateScreenCapacity === "function", "Adaptive screen-capacity estimator should exist");
+  console.assert(typeof runWithConcurrency === "function", "Concurrency-limited fetch runner should exist");
+  console.assert(typeof setLoading === "function", "Loading indicator toggler should exist");
+  console.assert(typeof handleMapClick === "function", "Route click handler should exist");
+  console.assert(typeof findNearestCityWithin === "function", "City snapping helper should exist");
+  console.assert(typeof haversineKm === "function", "Distance helper should exist");
+  console.assert(haversineKm(0, 0, 0, 0) === 0, "Distance to self should be zero");
+  console.assert(typeof setAppMode === "function", "Mode switcher should exist");
+  console.assert(typeof ensureRouteLineLayer === "function", "Route line layer creator should exist");
+  console.assert(typeof computeRouteEtas === "function", "Route ETA calculator should exist");
+  console.assert(typeof pickHourlyForecastAt === "function", "Hourly forecast picker should exist");
+  console.assert(typeof refreshRouteWeather === "function", "Route weather refresher should exist");
+}
+
+runSelfTests();
+bindControls();
+initMap();
