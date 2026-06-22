@@ -1459,15 +1459,18 @@ function haversineKm(lat1, lng1, lat2, lng2) {
 
 // Computes the cumulative as-the-crow-flies distance/time from the route
 // start to each point, assuming departure is "now" and travel proceeds at a
-// constant routeSpeedKmh. Returns an array aligned with routePoints, each
-// entry { point, distanceKm, etaDate }.
+// constant routeSpeedKmh. A flat ROUTE_DISTANCE_PADDING factor is applied to
+// the distance to roughly account for real roads/paths being longer than the
+// straight-line distance (rarely can you actually travel as the crow flies).
+// Returns an array aligned with routePoints, each entry { point, distanceKm, etaDate }.
+const ROUTE_DISTANCE_PADDING = 1.1; // +10%
 function computeRouteEtas() {
   const now = Date.now();
   let cumulativeKm = 0;
   return routePoints.map((point, index) => {
     if (index > 0) {
       const prev = routePoints[index - 1];
-      cumulativeKm += haversineKm(prev.lat, prev.lng, point.lat, point.lng);
+      cumulativeKm += haversineKm(prev.lat, prev.lng, point.lat, point.lng) * ROUTE_DISTANCE_PADDING;
     }
     const hours = routeSpeedKmh > 0 ? cumulativeKm / routeSpeedKmh : 0;
     const etaDate = new Date(now + hours * 3600 * 1000);
